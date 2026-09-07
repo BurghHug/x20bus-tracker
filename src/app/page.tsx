@@ -1,7 +1,17 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import dynamic from "next/dynamic";
 import { STOPS } from "@/lib/stops";
+
+const BusMap = dynamic(() => import("@/components/BusMap"), {
+  ssr: false,
+  loading: () => (
+    <div className="w-full h-52 rounded-2xl bg-slate-800 border border-slate-700 flex items-center justify-center text-slate-500 text-sm mb-5">
+      Loading map…
+    </div>
+  ),
+});
 
 interface Vehicle {
   id: string;
@@ -39,7 +49,6 @@ function kmToMiles(km: number) {
 }
 
 function estimateMinutes(distanceMiles: number) {
-  // ~11 mph average including stops
   const speedMph = 11;
   return Math.max(0, Math.round((distanceMiles / speedMph) * 60));
 }
@@ -47,13 +56,11 @@ function estimateMinutes(distanceMiles: number) {
 function friendlyDestination(dest?: string) {
   if (!dest) return "";
   const d = dest.toLowerCase();
-
   if (d.includes("natwest")) return "NatWest Bank, Stratford";
   if (d.includes("maybird")) return "Maybird Centre, Stratford";
   if (d.includes("wood street")) return "Wood Street, Stratford";
   if (d.includes("stratford")) return dest;
   if (d.includes("solihull")) return "Solihull";
-
   return dest;
 }
 
@@ -113,7 +120,7 @@ export default function Home() {
 
   return (
     <main className="min-h-dvh px-4 py-6 max-w-lg mx-auto">
-      <header className="mb-6">
+      <header className="mb-5">
         <div className="flex items-center gap-2">
           <span className="text-2xl">🚌</span>
           <div>
@@ -134,6 +141,11 @@ export default function Home() {
           </p>
         )}
       </header>
+
+      {/* Live Map */}
+      {!loading && !data?.error && (
+        <BusMap vehicles={stratfordBuses} />
+      )}
 
       {isSchoolWindow && (
         <div className="mb-5 rounded-xl bg-amber-500/15 border border-amber-500/30 px-4 py-3 text-amber-200 text-sm">
