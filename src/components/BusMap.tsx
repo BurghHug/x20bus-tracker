@@ -4,17 +4,15 @@ import { useEffect, useState } from "react";
 import { MapContainer, TileLayer, Marker, Popup, CircleMarker } from "react-leaflet";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
-import { STOPS } from "@/lib/stops";
+import { STOPS_STRATFORD, STOPS_SOLIHULL, Direction } from "@/lib/stops";
 
 interface Vehicle {
   id: string;
   lat: number;
   lon: number;
   destination?: string;
-  towardsStratford?: boolean;
 }
 
-// Fix default marker icons in Next.js
 const busIcon = L.divIcon({
   className: "",
   html: `<div style="
@@ -30,9 +28,10 @@ const busIcon = L.divIcon({
 
 interface Props {
   vehicles: Vehicle[];
+  direction?: Direction;
 }
 
-export default function BusMap({ vehicles }: Props) {
+export default function BusMap({ vehicles, direction = "stratford" }: Props) {
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
@@ -47,7 +46,7 @@ export default function BusMap({ vehicles }: Props) {
     );
   }
 
-  // Centre roughly on the middle of the route
+  const stops = direction === "stratford" ? STOPS_STRATFORD : STOPS_SOLIHULL;
   const centre: [number, number] = [52.25, -1.74];
 
   return (
@@ -63,8 +62,7 @@ export default function BusMap({ vehicles }: Props) {
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
         />
 
-        {/* Stops */}
-        {STOPS.map((stop) => (
+        {stops.map((stop) => (
           <CircleMarker
             key={stop.id}
             center={[stop.lat, stop.lon]}
@@ -80,7 +78,6 @@ export default function BusMap({ vehicles }: Props) {
           </CircleMarker>
         ))}
 
-        {/* Live buses (Stratford-bound only) */}
         {vehicles.map((v) => (
           <Marker key={v.id} position={[v.lat, v.lon]} icon={busIcon}>
             <Popup>
