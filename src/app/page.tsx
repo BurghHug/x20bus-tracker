@@ -19,6 +19,7 @@ interface BusData {
   vehicles: Vehicle[];
   error?: string;
   detail?: string;
+  count?: number;
 }
 
 function haversine(lat1: number, lon1: number, lat2: number, lon2: number) {
@@ -34,7 +35,7 @@ function haversine(lat1: number, lon1: number, lat2: number, lon2: number) {
 }
 
 function estimateMinutes(distanceKm: number) {
-  const speed = 18; // slightly more realistic average
+  const speed = 18;
   return Math.max(0, Math.round((distanceKm / speed) * 60));
 }
 
@@ -62,22 +63,18 @@ export default function Home() {
     return () => clearInterval(id);
   }, []);
 
+  // ONLY use buses that are going towards Stratford
+  const stratfordBuses = data?.vehicles?.filter((v) => v.towardsStratford) || [];
+
   const stopCards = STOPS.map((stop) => {
     let nearest: Vehicle | null = null;
     let nearestDist = Infinity;
 
-    if (data?.vehicles?.length) {
-      // First try only vehicles going towards Stratford
-      const towards = data.vehicles.filter((v) => v.towardsStratford);
-
-      const pool = towards.length > 0 ? towards : data.vehicles;
-
-      for (const v of pool) {
-        const d = haversine(stop.lat, stop.lon, v.lat, v.lon);
-        if (d < nearestDist) {
-          nearestDist = d;
-          nearest = v;
-        }
+    for (const v of stratfordBuses) {
+      const d = haversine(stop.lat, stop.lon, v.lat, v.lon);
+      if (d < nearestDist) {
+        nearestDist = d;
+        nearest = v;
       }
     }
 
@@ -94,7 +91,7 @@ export default function Home() {
   const now = new Date();
   const hour = now.getHours();
   const minute = now.getMinutes();
-  const isSchoolWindow = (hour === 15) || (hour === 14 && minute >= 40);
+  const isSchoolWindow = hour === 15 || (hour === 14 && minute >= 40);
 
   return (
     <main className="min-h-dvh px-4 py-6 max-w-lg mx-auto">
@@ -111,6 +108,11 @@ export default function Home() {
         {lastRefresh && (
           <p className="text-xs text-slate-500 mt-2">
             Updated {lastRefresh.toLocaleTimeString()}
+            {stratfordBuses.length > 0 && (
+              <span className="ml-2 text-emerald-500">
+                · {stratfordBuses.length} bus{stratfordBuses.length !== 1 ? "es" : ""} towards Stratford
+              </span>
+            )}
           </p>
         )}
       </header>
@@ -129,6 +131,16 @@ export default function Home() {
         <div className="rounded-xl bg-red-500/10 border border-red-500/30 p-4 text-red-300 text-sm mb-4">
           {data.error}
           {data.detail && <p className="mt-1 text-xs opacity-80">{data.detail}</p>}
+        </div>
+      )}
+
+      {!loading && !data?.error && stratfordBuses.length === 0 && (
+        <div className="mb-5 rounded-xl bg-slate-800 border border-slate-600 px-4 py-3 text-slate-300 text-sm">
+          No X20 buses currently heading towards Stratford.
+          <br />
+          <span className="text-slate-500 text-xs">
+            (There may be buses going the other way)
+          </span>
         </div>
       )}
 
@@ -160,7 +172,9 @@ export default function Home() {
                 </p>
               </div>
             ) : (
-              <p className="text-slate-500 text-sm mb-3">No live bus nearby</p>
+              <p className="text-slate-500 text-sm mb-3">
+                No Stratford-bound bus nearby
+              </p>
             )}
 
             {stop.keyTimes && (
