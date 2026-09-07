@@ -16,14 +16,10 @@ export async function GET() {
 
   try {
     const bbox = `${ROUTE_BBOX.minLon},${ROUTE_BBOX.minLat},${ROUTE_BBOX.maxLon},${ROUTE_BBOX.maxLat}`;
-
-    // Note: do not send a restrictive Accept header – BODS can return 406
     const url = `https://data.bus-data.dft.gov.uk/api/v1/datafeed?boundingBox=${bbox}&api_key=${BODS_KEY}`;
 
     const res = await fetch(url, {
-      headers: {
-        "User-Agent": "X20-Tracker/1.0",
-      },
+      headers: { "User-Agent": "X20-Tracker/1.0" },
       cache: "no-store",
     });
 
@@ -44,10 +40,7 @@ export async function GET() {
   } catch (err) {
     console.error("BODS fetch error:", err);
     return NextResponse.json(
-      {
-        error: "Failed to fetch live bus data",
-        detail: String(err),
-      },
+      { error: "Failed to fetch live bus data", detail: String(err) },
       { status: 502 }
     );
   }
@@ -62,16 +55,17 @@ function parseX20Vehicles(xml: string) {
     line: string;
     destination?: string;
     recordedAt?: string;
+    towardsStratford: boolean;
   }> = [];
 
   const blocks = xml.split("<VehicleActivity>").slice(1);
 
   for (const block of blocks) {
-    const lineMatch = block.match(/<LineRef>([^<]+)<\/LineRef>/i) ||
-                      block.match(/<PublishedLineName>([^<]+)<\/PublishedLineName>/i);
+    const lineMatch =
+      block.match(/<LineRef>([^<]+)<\/LineRef>/i) ||
+      block.match(/<PublishedLineName>([^<]+)<\/PublishedLineName>/i);
     const line = (lineMatch?.[1] || "").trim();
 
-    // Keep X20 and X21
     if (!/^X20$/i.test(line) && !/^X21$/i.test(line)) continue;
 
     const latMatch = block.match(/<Latitude>([^<]+)<\/Latitude>/i);
@@ -83,8 +77,19 @@ function parseX20Vehicles(xml: string) {
 
     const lat = parseFloat(latMatch?.[1] || "");
     const lon = parseFloat(lonMatch?.[1] || "");
-
     if (isNaN(lat) || isNaN(lon)) continue;
+
+    const destination = (destMatch?.[1] || "").trim();
+    const destLower = destination.toLowerCase();
+
+    // Decide if this vehicle is heading towards Stratford
+    const towardsStratford =
+      destLower.includes("stratford") ||
+      destLower.includes("maybird") ||
+      destLower.includes("wood street") ||
+      destLower.includes("bridge street") ||
+      destLower.includes("natwest") ||
+      (!destLower.includes("solihull") && !destLower.includes("shirley"));
 
     vehicles.push({
       id: vehicleRefMatch?.[1] || `${lat},${lon}`,
@@ -92,10 +97,17 @@ function parseX20Vehicles(xml: string) {
       lon,
       bearing: bearingMatch ? parseFloat(bearingMatch[1]) : undefined,
       line,
-      destination: destMatch?.[1],
+      destination,
       recordedAt: recordedMatch?.[1],
+      towardsStratford,
     });
   }
+
+  // Prefer vehicles going towards Stratford
+  vehicles.sort((a, b) => {
+    if (a.towardsStratford === b.towardsStratford) return 0;
+    return a.towardsStratford ? -1 : 1;
+  });
 
   return vehicles;
 }
