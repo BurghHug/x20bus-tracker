@@ -6,9 +6,7 @@ export interface Stop {
   shortName: string;
   lat: number;
   lon: number;
-  // Approximate order on the route towards Stratford
   order: number;
-  // Key scheduled times (afternoon school run focus)
   keyTimes?: string[];
 }
 
@@ -40,9 +38,9 @@ export const STOPS: Stop[] = [
     order: 3,
   },
   {
-    id: "stratford-wood-street",
-    name: "Stratford, Wood Street",
-    shortName: "Wood Street",
+    id: "stratford-natwest",
+    name: "Stratford, NatWest Bank",
+    shortName: "NatWest Bank Stratford",
     lat: 52.1920,
     lon: -1.7065,
     order: 4,
