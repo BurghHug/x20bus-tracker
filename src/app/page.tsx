@@ -54,6 +54,27 @@ function estimateMinutes(distanceMiles: number) {
   return Math.max(0, Math.round((distanceMiles / speedMph) * 60));
 }
 
+// Initial compass bearing (0-360°) travelling from point 1 to point 2.
+// Used to check whether a vehicle's reported heading actually points
+// toward a stop, or away from it. A bus that has looped through a school
+// driveway and is heading back onto the main road can be very close to
+// the stop while moving away from it — straight-line distance alone can't
+// tell those two situations apart, which is what was causing "2 min away"
+// readings for buses that had already been and gone.
+function bearingTo(lat1: number, lon1: number, lat2: number, lon2: number) {
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const y = Math.sin(toRad(lon2 - lon1)) * Math.cos(toRad(lat2));
+  const x =
+    Math.cos(toRad(lat1)) * Math.sin(toRad(lat2)) -
+    Math.sin(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.cos(toRad(lon2 - lon1));
+  return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
+}
+
+function angleDiff(a: number, b: number) {
+  const d = Math.abs(a - b) % 360;
+  return d > 180 ? 360 - d : d;
+}
+
 export default function Home() {
   const [direction, setDirection] = useState<Direction>("stratford");
   const [data, setData] = useState<BusData | null>(null);
@@ -87,25 +108,43 @@ export default function Home() {
     ) || [];
 
   const stopCards = stops.map((stop) => {
-    let nearest: Vehicle | null = null;
-    let nearestDistMiles = Infinity;
-
-    for (const v of filteredBuses) {
+    // For every candidate vehicle, work out both its distance to this stop
+    // and — where a bearing was reported — whether it's actually heading
+    // toward the stop or away from it.
+    const candidates = filteredBuses.map((v) => {
       const distKm = haversineKm(stop.lat, stop.lon, v.lat, v.lon);
-      const distMiles = kmToMiles(distKm);
-      if (distMiles < nearestDistMiles) {
-        nearestDistMiles = distMiles;
-        nearest = v;
+      const distanceMiles = kmToMiles(distKm);
+      let approaching: boolean | null = null; // null = heading unknown
+      if (v.bearing != null) {
+        const toStop = bearingTo(v.lat, v.lon, stop.lat, stop.lon);
+        approaching = angleDiff(v.bearing, toStop) <= 90;
       }
-    }
+      return { v, distanceMiles, approaching };
+    });
 
-    const mins = nearest ? estimateMinutes(nearestDistMiles) : null;
+    // Prefer the nearest vehicle that's approaching (or has unknown
+    // heading — better to show a possibly-rough live figure than hide it
+    // just because bearing wasn't reported). Only fall through to a
+    // clearly-departing vehicle so we can say it's just gone, rather than
+    // silently showing nothing.
+    const inbound = candidates
+      .filter((c) => c.approaching !== false)
+      .sort((a, b) => a.distanceMiles - b.distanceMiles);
+    const departing = candidates
+      .filter((c) => c.approaching === false)
+      .sort((a, b) => a.distanceMiles - b.distanceMiles);
+
+    const best = inbound[0] || null;
+    const justPassed = !best && departing[0] ? departing[0] : null;
+
+    const minutes = best ? estimateMinutes(best.distanceMiles) : null;
 
     return {
       stop,
-      nearest,
-      distanceMiles: nearest ? nearestDistMiles : null,
-      minutes: mins,
+      nearest: best?.v || null,
+      distanceMiles: best ? best.distanceMiles : null,
+      minutes,
+      justPassedMiles: justPassed ? justPassed.distanceMiles : null,
     };
   });
 
@@ -201,7 +240,7 @@ export default function Home() {
       )}
 
       <div className="space-y-3">
-        {stopCards.map(({ stop, nearest, distanceMiles, minutes }) => (
+        {stopCards.map(({ stop, nearest, distanceMiles, minutes, justPassedMiles }) => (
           <article
             key={stop.id}
             className="rounded-2xl bg-slate-800/80 border border-slate-700 p-4"
@@ -215,6 +254,11 @@ export default function Home() {
                   LIVE
                 </span>
               )}
+              {!nearest && justPassedMiles !== null && (
+                <span className="text-[10px] font-medium bg-slate-500/20 text-slate-400 px-2 py-0.5 rounded-full">
+                  PASSED
+                </span>
+              )}
             </div>
 
             {nearest && minutes !== null ? (
@@ -224,6 +268,15 @@ export default function Home() {
                 </p>
                 <p className="text-xs text-slate-400">
                   {distanceMiles!.toFixed(1)} miles away
+                </p>
+              </div>
+            ) : justPassedMiles !== null ? (
+              <div className="mb-3">
+                <p className="text-lg font-semibold text-slate-400">
+                  Just passed
+                </p>
+                <p className="text-xs text-slate-500">
+                  Nearest bus ({justPassedMiles.toFixed(1)} mi away) is heading away from this stop
                 </p>
               </div>
             ) : (
