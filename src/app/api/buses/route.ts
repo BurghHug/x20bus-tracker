@@ -15,34 +15,39 @@ export async function GET() {
   }
 
   try {
-    // Request live vehicle positions for the area covering the X20
     const bbox = `${ROUTE_BBOX.minLon},${ROUTE_BBOX.minLat},${ROUTE_BBOX.maxLon},${ROUTE_BBOX.maxLat}`;
+
+    // Note: do not send a restrictive Accept header – BODS can return 406
     const url = `https://data.bus-data.dft.gov.uk/api/v1/datafeed?boundingBox=${bbox}&api_key=${BODS_KEY}`;
 
     const res = await fetch(url, {
-      headers: { Accept: "application/xml" },
-      next: { revalidate: 15 }, // cache briefly
+      headers: {
+        "User-Agent": "X20-Tracker/1.0",
+      },
+      cache: "no-store",
     });
 
     if (!res.ok) {
-      throw new Error(`BODS responded ${res.status}`);
+      const body = await res.text().catch(() => "");
+      throw new Error(`BODS responded ${res.status}${body ? `: ${body.slice(0, 200)}` : ""}`);
     }
 
     const xml = await res.text();
-
-    // Very lightweight extraction of X20 vehicles
-    // (In production you would use a proper XML parser)
     const vehicles = parseX20Vehicles(xml);
 
     return NextResponse.json({
       updated: new Date().toISOString(),
+      count: vehicles.length,
       vehicles,
       directionFilter: "towards Stratford",
     });
   } catch (err) {
-    console.error(err);
+    console.error("BODS fetch error:", err);
     return NextResponse.json(
-      { error: "Failed to fetch live bus data", detail: String(err) },
+      {
+        error: "Failed to fetch live bus data",
+        detail: String(err),
+      },
       { status: 502 }
     );
   }
@@ -59,14 +64,14 @@ function parseX20Vehicles(xml: string) {
     recordedAt?: string;
   }> = [];
 
-  // Split on VehicleActivity blocks
   const blocks = xml.split("<VehicleActivity>").slice(1);
 
   for (const block of blocks) {
-    const lineMatch = block.match(/<LineRef>([^<]+)<\/LineRef>/i);
-    const line = lineMatch?.[1]?.trim() || "";
+    const lineMatch = block.match(/<LineRef>([^<]+)<\/LineRef>/i) ||
+                      block.match(/<PublishedLineName>([^<]+)<\/PublishedLineName>/i);
+    const line = (lineMatch?.[1] || "").trim();
 
-    // Only keep X20 (and occasional X21 if present)
+    // Keep X20 and X21
     if (!/^X20$/i.test(line) && !/^X21$/i.test(line)) continue;
 
     const latMatch = block.match(/<Latitude>([^<]+)<\/Latitude>/i);
@@ -81,15 +86,6 @@ function parseX20Vehicles(xml: string) {
 
     if (isNaN(lat) || isNaN(lon)) continue;
 
-    // Heuristic: prefer vehicles whose destination suggests Stratford direction
-    const dest = (destMatch?.[1] || "").toLowerCase();
-    const towardsStratford =
-      dest.includes("stratford") ||
-      dest.includes("maybird") ||
-      dest.includes("wood street") ||
-      dest.includes("henley") === false; // rough
-
-    // For now we keep all X20 and let the frontend decide, but mark direction
     vehicles.push({
       id: vehicleRefMatch?.[1] || `${lat},${lon}`,
       lat,
