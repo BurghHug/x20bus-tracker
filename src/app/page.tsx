@@ -81,16 +81,9 @@ function angleDiff(a: number, b: number) {
 
 // Real road-network routing via OSRM's public demo server — genuine
 // driving distance/time along actual roads, rather than straight-line
-// distance divided by a flat assumed speed. This is what makes the ETA a
-// true prediction rather than a rough guess: it accounts for the real
-// road layout (including a stop like the school driveway loop), even
-// though it still doesn't know about live traffic conditions.
-//
-// The demo server is free and requires no API key, but its usage policy
-// asks for no more than ~1 request/second and offers no uptime guarantee
-// — reasonable for a handful of personal requests every 20s, so callers
-// of this function should be sequenced with a small delay between them
-// rather than fired all at once.
+// distance divided by a flat assumed speed. Free, no API key, but its
+// fair-use guidance asks for roughly 1 request/second or fewer, so calls
+// are sequenced with a short gap rather than fired all at once.
 async function fetchDrivingEta(
   fromLat: number,
   fromLon: number,
@@ -117,12 +110,68 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Parses a "HH:MM"-style schedule string into a Date for today. Returns
+// null for anything that isn't a plain clock time (e.g. "hourly, on the
+// hour" is deliberately left as non-comparable rather than guessed at).
+function parseTimeToday(hhmm: string, reference: Date): Date | null {
+  const m = hhmm.match(/^(\d{1,2}):(\d{2})/);
+  if (!m) return null;
+  const d = new Date(reference);
+  d.setHours(parseInt(m[1], 10), parseInt(m[2], 10), 0, 0);
+  return d;
+}
+
+// Of a stop's published times, picks whichever is closest to right now —
+// that's the specific working the live bus is presumably trying to serve,
+// whether it's running early or late against it.
+function nearestScheduledTime(keyTimes: string[] | undefined, now: Date): Date | null {
+  if (!keyTimes || keyTimes.length === 0) return null;
+  let best: Date | null = null;
+  let bestDiff = Infinity;
+  for (const t of keyTimes) {
+    const d = parseTimeToday(t, now);
+    if (!d) continue;
+    const diff = Math.abs(d.getTime() - now.getTime());
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      best = d;
+    }
+  }
+  return best;
+}
+
+function formatDelay(
+  predicted: Date,
+  scheduled: Date
+): { text: string; tone: "late" | "early" | "onTime" } {
+  const diffMin = Math.round((predicted.getTime() - scheduled.getTime()) / 60000);
+  if (diffMin >= 2) return { text: `Running ${diffMin} min late`, tone: "late" };
+  if (diffMin <= -2) return { text: `${Math.abs(diffMin)} min early`, tone: "early" };
+  return { text: "On time", tone: "onTime" };
+}
+
+// How old the bus's last reported position is. A large age can mean the
+// bus's AVL unit has stopped reporting (signal loss, hardware issue, or
+// the vehicle has gone off-duty) rather than that it's genuinely
+// stationary — worth flagging rather than presenting a possibly-dead
+// position as current.
+function formatAge(recordedAt: string | undefined, now: Date): { text: string; stale: boolean } | null {
+  if (!recordedAt) return null;
+  const t = new Date(recordedAt).getTime();
+  if (Number.isNaN(t)) return null;
+  const ageSec = Math.max(0, Math.round((now.getTime() - t) / 1000));
+  const stale = ageSec > 90;
+  const text = ageSec < 60 ? `${ageSec}s ago` : `${Math.round(ageSec / 60)}m ago`;
+  return { text, stale };
+}
+
 export default function Home() {
   const [direction, setDirection] = useState<Direction>("stratford");
   const [data, setData] = useState<BusData | null>(null);
   const [loading, setLoading] = useState(true);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
   const [routedEtas, setRoutedEtas] = useState<Record<string, RoutedEta | null>>({});
+  const [now, setNow] = useState(new Date());
 
   async function load() {
     try {
@@ -140,6 +189,13 @@ export default function Home() {
   useEffect(() => {
     load();
     const id = setInterval(load, 20000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Ticks once a second so "Xs ago" / delay-vs-schedule stay live between
+  // polls, not just refresh every 20s alongside the data itself.
+  useEffect(() => {
+    const id = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(id);
   }, []);
 
@@ -165,9 +221,6 @@ export default function Home() {
       return { v, distanceMiles, approaching };
     });
 
-    // Prefer the nearest vehicle that's approaching (or has unknown
-    // heading). Only fall through to a clearly-departing vehicle so we can
-    // say it's just gone, rather than showing nothing at all.
     const inbound = candidates
       .filter((c) => c.approaching !== false)
       .sort((a, b) => a.distanceMiles - b.distanceMiles);
@@ -178,27 +231,30 @@ export default function Home() {
     const best = inbound[0] || null;
     const justPassed = !best && departing[0] ? departing[0] : null;
 
-    // Straight-line estimate — always available instantly, used as the
-    // fallback while a real routed ETA is being fetched (or if it fails).
     const straightLineMinutes = best ? estimateMinutes(best.distanceMiles) : null;
-
     const routed = best ? routedEtas[stop.id] : undefined;
+    const minutes = routed ? routed.minutes : straightLineMinutes;
+
+    const predictedArrival = best && minutes !== null ? new Date(now.getTime() + minutes * 60000) : null;
+    const scheduledTarget = nearestScheduledTime(stop.keyTimes, now);
+    const delay = predictedArrival && scheduledTarget ? formatDelay(predictedArrival, scheduledTarget) : null;
+    const age = best ? formatAge(best.v.recordedAt, now) : null;
 
     return {
       stop,
       nearest: best?.v || null,
       distanceMiles: routed ? routed.miles : best ? best.distanceMiles : null,
-      minutes: routed ? routed.minutes : straightLineMinutes,
+      minutes,
       isRouted: !!routed,
       justPassedMiles: justPassed ? justPassed.distanceMiles : null,
+      delay,
+      age,
     };
   });
 
   // After each poll, refine the straight-line estimates into real
   // road-routed ETAs for whichever vehicle is actually approaching each
-  // stop in the current direction. Sequenced with a short gap between
-  // requests to stay well within OSRM's public demo server's fair-use
-  // guidance, rather than firing all four at once.
+  // stop in the current direction.
   useEffect(() => {
     let cancelled = false;
 
@@ -225,13 +281,13 @@ export default function Home() {
           .filter((c) => c.approaching !== false)
           .sort((a, b) => a.distanceMiles - b.distanceMiles)[0];
 
-        if (!best) continue; // nothing to route — no live vehicle for this stop right now
+        if (!best) continue;
 
         const eta = await fetchDrivingEta(best.v.lat, best.v.lon, stop.lat, stop.lon);
         if (!cancelled) {
           setRoutedEtas((prev) => ({ ...prev, [stop.id]: eta }));
         }
-        await sleep(350); // stay comfortably under ~1 req/sec across the batch
+        await sleep(350);
       }
     }
 
@@ -243,7 +299,6 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data, direction]);
 
-  const now = new Date();
   const hour = now.getHours();
   const minute = now.getMinutes();
   const isSchoolWindowHome = direction === "stratford" && (hour === 15 || (hour === 14 && minute >= 40));
@@ -335,7 +390,7 @@ export default function Home() {
       )}
 
       <div className="space-y-3">
-        {stopCards.map(({ stop, nearest, distanceMiles, minutes, isRouted, justPassedMiles }) => (
+        {stopCards.map(({ stop, nearest, distanceMiles, minutes, isRouted, justPassedMiles, delay, age }) => (
           <article
             key={stop.id}
             className="rounded-2xl bg-slate-800/80 border border-slate-700 p-4"
@@ -369,6 +424,27 @@ export default function Home() {
                     <span className="text-slate-500"> · straight-line estimate</span>
                   )}
                 </p>
+
+                {delay && (
+                  <p
+                    className={`text-xs font-medium mt-1 ${
+                      delay.tone === "late"
+                        ? "text-red-400"
+                        : delay.tone === "early"
+                        ? "text-sky-400"
+                        : "text-emerald-400"
+                    }`}
+                  >
+                    {delay.text} vs schedule
+                  </p>
+                )}
+
+                {age && (
+                  <p className={`text-[11px] mt-1 ${age.stale ? "text-amber-400" : "text-slate-500"}`}>
+                    {age.stale ? "⚠ " : ""}Position from {age.text}
+                    {age.stale ? " — may be out of date" : ""}
+                  </p>
+                )}
               </div>
             ) : justPassedMiles !== null ? (
               <div className="mb-3">
