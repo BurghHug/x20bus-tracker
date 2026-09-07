@@ -53,17 +53,6 @@ function estimateMinutes(distanceMiles: number) {
   return Math.max(0, Math.round((distanceMiles / speedMph) * 60));
 }
 
-function friendlyDestination(dest?: string) {
-  if (!dest) return "";
-  const d = dest.toLowerCase();
-  if (d.includes("natwest")) return "NatWest Bank, Stratford";
-  if (d.includes("maybird")) return "Maybird Centre, Stratford";
-  if (d.includes("wood street")) return "Wood Street, Stratford";
-  if (d.includes("stratford")) return dest;
-  if (d.includes("solihull")) return "Solihull";
-  return dest;
-}
-
 export default function Home() {
   const [data, setData] = useState<BusData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -198,9 +187,6 @@ export default function Home() {
                 </p>
                 <p className="text-xs text-slate-400">
                   {distanceMiles!.toFixed(1)} miles away
-                  {nearest.destination
-                    ? ` · ${friendlyDestination(nearest.destination)}`
-                    : ""}
                 </p>
               </div>
             ) : (
