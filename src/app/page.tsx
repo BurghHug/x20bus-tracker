@@ -22,7 +22,7 @@ interface BusData {
   count?: number;
 }
 
-function haversine(lat1: number, lon1: number, lat2: number, lon2: number) {
+function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number) {
   const R = 6371;
   const dLat = ((lat2 - lat1) * Math.PI) / 180;
   const dLon = ((lon2 - lon1) * Math.PI) / 180;
@@ -34,9 +34,27 @@ function haversine(lat1: number, lon1: number, lat2: number, lon2: number) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-function estimateMinutes(distanceKm: number) {
-  const speed = 18;
-  return Math.max(0, Math.round((distanceKm / speed) * 60));
+function kmToMiles(km: number) {
+  return km / 1.60934;
+}
+
+function estimateMinutes(distanceMiles: number) {
+  // ~11 mph average including stops
+  const speedMph = 11;
+  return Math.max(0, Math.round((distanceMiles / speedMph) * 60));
+}
+
+function friendlyDestination(dest?: string) {
+  if (!dest) return "";
+  const d = dest.toLowerCase();
+
+  if (d.includes("natwest")) return "NatWest Bank, Stratford";
+  if (d.includes("maybird")) return "Maybird Centre, Stratford";
+  if (d.includes("wood street")) return "Wood Street, Stratford";
+  if (d.includes("stratford")) return dest;
+  if (d.includes("solihull")) return "Solihull";
+
+  return dest;
 }
 
 export default function Home() {
@@ -63,27 +81,27 @@ export default function Home() {
     return () => clearInterval(id);
   }, []);
 
-  // ONLY use buses that are going towards Stratford
   const stratfordBuses = data?.vehicles?.filter((v) => v.towardsStratford) || [];
 
   const stopCards = STOPS.map((stop) => {
     let nearest: Vehicle | null = null;
-    let nearestDist = Infinity;
+    let nearestDistMiles = Infinity;
 
     for (const v of stratfordBuses) {
-      const d = haversine(stop.lat, stop.lon, v.lat, v.lon);
-      if (d < nearestDist) {
-        nearestDist = d;
+      const distKm = haversineKm(stop.lat, stop.lon, v.lat, v.lon);
+      const distMiles = kmToMiles(distKm);
+      if (distMiles < nearestDistMiles) {
+        nearestDistMiles = distMiles;
         nearest = v;
       }
     }
 
-    const mins = nearest ? estimateMinutes(nearestDist) : null;
+    const mins = nearest ? estimateMinutes(nearestDistMiles) : null;
 
     return {
       stop,
       nearest,
-      distanceKm: nearest ? nearestDist : null,
+      distanceMiles: nearest ? nearestDistMiles : null,
       minutes: mins,
     };
   });
@@ -145,7 +163,7 @@ export default function Home() {
       )}
 
       <div className="space-y-3">
-        {stopCards.map(({ stop, nearest, distanceKm, minutes }) => (
+        {stopCards.map(({ stop, nearest, distanceMiles, minutes }) => (
           <article
             key={stop.id}
             className="rounded-2xl bg-slate-800/80 border border-slate-700 p-4"
@@ -167,8 +185,10 @@ export default function Home() {
                   {minutes <= 1 ? "Due" : `${minutes} min`}
                 </p>
                 <p className="text-xs text-slate-400">
-                  {distanceKm!.toFixed(1)} km away
-                  {nearest.destination ? ` · ${nearest.destination}` : ""}
+                  {distanceMiles!.toFixed(1)} miles away
+                  {nearest.destination
+                    ? ` · ${friendlyDestination(nearest.destination)}`
+                    : ""}
                 </p>
               </div>
             ) : (
