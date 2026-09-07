@@ -1,5 +1,4 @@
 // Stops for both directions of the X20
-
 export interface Stop {
   id: string;
   name: string;
@@ -18,8 +17,8 @@ export const STOPS_STRATFORD: Stop[] = [
     id: "henley-high-school",
     name: "Henley High School",
     shortName: "Henley High School",
-    lat: 52.2915,
-    lon: -1.7780,
+    lat: 52.286295, // verified pin: Henley-in-Arden, B95 5DG
+    lon: -1.776102,
     order: 1,
     keyTimes: ["15:30"],
   },
@@ -27,8 +26,8 @@ export const STOPS_STRATFORD: Stop[] = [
     id: "bearley-oak-tree",
     name: "Bearley, Oak Tree Close",
     shortName: "Bearley Oak Tree Close",
-    lat: 52.2440,
-    lon: -1.7500,
+    lat: 52.243609, // verified pin: Oak Tree Close, Bearley
+    lon: -1.740660,
     order: 2,
     keyTimes: ["15:40"],
   },
@@ -94,6 +93,11 @@ export const STOPS_SOLIHULL: Stop[] = [
     id: "bearley",
     name: "Bearley",
     shortName: "Bearley",
+    // NOTE: still an approximation — this is the morning-direction stop,
+    // possibly not the exact same curb as the verified "Oak Tree Close"
+    // pin used for the afternoon direction above. Worth confirming with a
+    // real dropped pin if this direction/stop is ever actually used for a
+    // pickup or drop-off.
     lat: 52.2440,
     lon: -1.7500,
     order: 5,
