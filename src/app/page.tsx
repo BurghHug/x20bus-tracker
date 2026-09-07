@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import dynamic from "next/dynamic";
-import { STOPS } from "@/lib/stops";
+import { STOPS_STRATFORD, STOPS_SOLIHULL, Direction } from "@/lib/stops";
 
 const BusMap = dynamic(() => import("@/components/BusMap"), {
   ssr: false,
@@ -22,6 +22,7 @@ interface Vehicle {
   destination?: string;
   recordedAt?: string;
   towardsStratford?: boolean;
+  towardsSolihull?: boolean;
 }
 
 interface BusData {
@@ -54,6 +55,7 @@ function estimateMinutes(distanceMiles: number) {
 }
 
 export default function Home() {
+  const [direction, setDirection] = useState<Direction>("stratford");
   const [data, setData] = useState<BusData | null>(null);
   const [loading, setLoading] = useState(true);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
@@ -77,13 +79,18 @@ export default function Home() {
     return () => clearInterval(id);
   }, []);
 
-  const stratfordBuses = data?.vehicles?.filter((v) => v.towardsStratford) || [];
+  const stops = direction === "stratford" ? STOPS_STRATFORD : STOPS_SOLIHULL;
 
-  const stopCards = STOPS.map((stop) => {
+  const filteredBuses =
+    data?.vehicles?.filter((v) =>
+      direction === "stratford" ? v.towardsStratford : v.towardsSolihull
+    ) || [];
+
+  const stopCards = stops.map((stop) => {
     let nearest: Vehicle | null = null;
     let nearestDistMiles = Infinity;
 
-    for (const v of stratfordBuses) {
+    for (const v of filteredBuses) {
       const distKm = haversineKm(stop.lat, stop.lon, v.lat, v.lon);
       const distMiles = kmToMiles(distKm);
       if (distMiles < nearestDistMiles) {
@@ -105,40 +112,73 @@ export default function Home() {
   const now = new Date();
   const hour = now.getHours();
   const minute = now.getMinutes();
-  const isSchoolWindow = hour === 15 || (hour === 14 && minute >= 40);
+  const isSchoolWindowHome = direction === "stratford" && (hour === 15 || (hour === 14 && minute >= 40));
+  const isSchoolWindowToSchool = direction === "solihull" && hour === 7;
 
   return (
     <main className="min-h-dvh px-4 py-6 max-w-lg mx-auto">
-      <header className="mb-5">
+      <header className="mb-4">
         <div className="flex items-center gap-2">
           <span className="text-2xl">🚌</span>
           <div>
             <h1 className="text-xl font-bold tracking-tight">X20 Tracker</h1>
             <p className="text-sm text-slate-400">
-              Towards Stratford · School run focus
+              {direction === "stratford"
+                ? "Towards Stratford · School run home"
+                : "Towards Solihull · To school"}
             </p>
           </div>
         </div>
         {lastRefresh && (
           <p className="text-xs text-slate-500 mt-2">
             Updated {lastRefresh.toLocaleTimeString()}
-            {stratfordBuses.length > 0 && (
+            {filteredBuses.length > 0 && (
               <span className="ml-2 text-emerald-500">
-                · {stratfordBuses.length} bus{stratfordBuses.length !== 1 ? "es" : ""} towards Stratford
+                · {filteredBuses.length} bus{filteredBuses.length !== 1 ? "es" : ""}
               </span>
             )}
           </p>
         )}
       </header>
 
+      {/* Direction Toggle */}
+      <div className="flex rounded-xl bg-slate-800 border border-slate-700 p-1 mb-5">
+        <button
+          onClick={() => setDirection("stratford")}
+          className={`flex-1 py-2 px-3 rounded-lg text-sm font-medium transition ${
+            direction === "stratford"
+              ? "bg-sky-600 text-white"
+              : "text-slate-400 hover:text-slate-200"
+          }`}
+        >
+          Towards Stratford
+        </button>
+        <button
+          onClick={() => setDirection("solihull")}
+          className={`flex-1 py-2 px-3 rounded-lg text-sm font-medium transition ${
+            direction === "solihull"
+              ? "bg-sky-600 text-white"
+              : "text-slate-400 hover:text-slate-200"
+          }`}
+        >
+          Towards Solihull
+        </button>
+      </div>
+
       {/* Live Map */}
       {!loading && !data?.error && (
-        <BusMap vehicles={stratfordBuses} />
+        <BusMap vehicles={filteredBuses} direction={direction} />
       )}
 
-      {isSchoolWindow && (
+      {isSchoolWindowHome && (
         <div className="mb-5 rounded-xl bg-amber-500/15 border border-amber-500/30 px-4 py-3 text-amber-200 text-sm">
           <strong>School run window</strong> — watching for the 15:30 from Henley High School
+        </div>
+      )}
+
+      {isSchoolWindowToSchool && (
+        <div className="mb-5 rounded-xl bg-amber-500/15 border border-amber-500/30 px-4 py-3 text-amber-200 text-sm">
+          <strong>Morning window</strong> — buses towards school
         </div>
       )}
 
@@ -153,13 +193,10 @@ export default function Home() {
         </div>
       )}
 
-      {!loading && !data?.error && stratfordBuses.length === 0 && (
+      {!loading && !data?.error && filteredBuses.length === 0 && (
         <div className="mb-5 rounded-xl bg-slate-800 border border-slate-600 px-4 py-3 text-slate-300 text-sm">
-          No X20 buses currently heading towards Stratford.
-          <br />
-          <span className="text-slate-500 text-xs">
-            (There may be buses going the other way)
-          </span>
+          No X20 buses currently heading{" "}
+          {direction === "stratford" ? "towards Stratford" : "towards Solihull"}.
         </div>
       )}
 
@@ -191,7 +228,7 @@ export default function Home() {
               </div>
             ) : (
               <p className="text-slate-500 text-sm mb-3">
-                No Stratford-bound bus nearby
+                No bus nearby
               </p>
             )}
 
