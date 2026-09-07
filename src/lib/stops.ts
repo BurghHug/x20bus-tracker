@@ -36,6 +36,7 @@ export const STOPS: Stop[] = [
     lat: 52.1985,
     lon: -1.7160,
     order: 3,
+    keyTimes: ["15:56"],
   },
   {
     id: "stratford-natwest",
@@ -44,6 +45,7 @@ export const STOPS: Stop[] = [
     lat: 52.1920,
     lon: -1.7065,
     order: 4,
+    keyTimes: ["16:03"],
   },
 ];
 
