@@ -1,4 +1,4 @@
-// Official stops we care about for the X20 (towards Stratford)
+// Stops for both directions of the X20
 
 export interface Stop {
   id: string;
@@ -10,7 +10,10 @@ export interface Stop {
   keyTimes?: string[];
 }
 
-export const STOPS: Stop[] = [
+export type Direction = "stratford" | "solihull";
+
+// Afternoon / home – towards Stratford
+export const STOPS_STRATFORD: Stop[] = [
   {
     id: "henley-high-school",
     name: "Henley High School",
@@ -49,7 +52,64 @@ export const STOPS: Stop[] = [
   },
 ];
 
-// Bounding box covering the X20 route (Solihull → Stratford)
+// Morning / to school – towards Solihull
+export const STOPS_SOLIHULL: Stop[] = [
+  {
+    id: "natwest-bank",
+    name: "Stratford, NatWest Bank",
+    shortName: "NatWest Bank",
+    lat: 52.1920,
+    lon: -1.7065,
+    order: 1,
+    keyTimes: ["07:35"],
+  },
+  {
+    id: "mcdonalds",
+    name: "Stratford, opp McDonalds",
+    shortName: "opp McDonalds",
+    lat: 52.1945,
+    lon: -1.7100,
+    order: 2,
+    keyTimes: ["07:37"],
+  },
+  {
+    id: "tesco",
+    name: "Stratford, opp Tesco",
+    shortName: "opp Tesco",
+    lat: 52.1970,
+    lon: -1.7140,
+    order: 3,
+    keyTimes: ["07:42"],
+  },
+  {
+    id: "avenue-farm",
+    name: "Stratford, adj Avenue Farm",
+    shortName: "adj Avenue Farm",
+    lat: 52.2000,
+    lon: -1.7180,
+    order: 4,
+    keyTimes: ["07:43"],
+  },
+  {
+    id: "bearley",
+    name: "Bearley",
+    shortName: "Bearley",
+    lat: 52.2440,
+    lon: -1.7500,
+    order: 5,
+    keyTimes: ["08:00"],
+  },
+  {
+    id: "wootton-wawen",
+    name: "Wootton Wawen",
+    shortName: "Wootton Wawen",
+    lat: 52.2660,
+    lon: -1.7750,
+    order: 6,
+    keyTimes: ["08:06"],
+  },
+];
+
 export const ROUTE_BBOX = {
   minLon: -1.85,
   minLat: 52.18,
