@@ -11,16 +11,18 @@ interface Vehicle {
   line: string;
   destination?: string;
   recordedAt?: string;
+  towardsStratford?: boolean;
 }
 
 interface BusData {
   updated: string;
   vehicles: Vehicle[];
   error?: string;
+  detail?: string;
 }
 
 function haversine(lat1: number, lon1: number, lat2: number, lon2: number) {
-  const R = 6371; // km
+  const R = 6371;
   const dLat = ((lat2 - lat1) * Math.PI) / 180;
   const dLon = ((lon2 - lon1) * Math.PI) / 180;
   const a =
@@ -32,9 +34,8 @@ function haversine(lat1: number, lon1: number, lat2: number, lon2: number) {
 }
 
 function estimateMinutes(distanceKm: number) {
-  // Rough average urban bus speed ~ 18-22 km/h including stops
-  const speed = 20;
-  return Math.round((distanceKm / speed) * 60);
+  const speed = 18; // slightly more realistic average
+  return Math.max(0, Math.round((distanceKm / speed) * 60));
 }
 
 export default function Home() {
@@ -57,18 +58,21 @@ export default function Home() {
 
   useEffect(() => {
     load();
-    const id = setInterval(load, 20000); // refresh every 20s
+    const id = setInterval(load, 20000);
     return () => clearInterval(id);
   }, []);
 
-  // For each stop, find the nearest vehicle that appears to be approaching
-  // (simple version: closest vehicle overall, marked as live)
   const stopCards = STOPS.map((stop) => {
     let nearest: Vehicle | null = null;
     let nearestDist = Infinity;
 
-    if (data?.vehicles) {
-      for (const v of data.vehicles) {
+    if (data?.vehicles?.length) {
+      // First try only vehicles going towards Stratford
+      const towards = data.vehicles.filter((v) => v.towardsStratford);
+
+      const pool = towards.length > 0 ? towards : data.vehicles;
+
+      for (const v of pool) {
         const d = haversine(stop.lat, stop.lon, v.lat, v.lon);
         if (d < nearestDist) {
           nearestDist = d;
@@ -88,12 +92,12 @@ export default function Home() {
   });
 
   const now = new Date();
-  const isSchoolWindow =
-    now.getHours() === 15 || (now.getHours() === 14 && now.getMinutes() >= 45);
+  const hour = now.getHours();
+  const minute = now.getMinutes();
+  const isSchoolWindow = (hour === 15) || (hour === 14 && minute >= 40);
 
   return (
     <main className="min-h-dvh px-4 py-6 max-w-lg mx-auto">
-      {/* Header */}
       <header className="mb-6">
         <div className="flex items-center gap-2">
           <span className="text-2xl">🚌</span>
@@ -111,11 +115,9 @@ export default function Home() {
         )}
       </header>
 
-      {/* School run callout */}
       {isSchoolWindow && (
         <div className="mb-5 rounded-xl bg-amber-500/15 border border-amber-500/30 px-4 py-3 text-amber-200 text-sm">
-          <strong>School run window</strong> — looking for the 15:30 from
-          Henley High School
+          <strong>School run window</strong> — watching for the 15:30 from Henley High School
         </div>
       )}
 
@@ -126,13 +128,10 @@ export default function Home() {
       {data?.error && (
         <div className="rounded-xl bg-red-500/10 border border-red-500/30 p-4 text-red-300 text-sm mb-4">
           {data.error}
-          <p className="mt-2 text-xs opacity-80">
-            Check that BODS_API_KEY is set in Vercel environment variables.
-          </p>
+          {data.detail && <p className="mt-1 text-xs opacity-80">{data.detail}</p>}
         </div>
       )}
 
-      {/* Stop cards */}
       <div className="space-y-3">
         {stopCards.map(({ stop, nearest, distanceKm, minutes }) => (
           <article
@@ -157,21 +156,17 @@ export default function Home() {
                 </p>
                 <p className="text-xs text-slate-400">
                   {distanceKm!.toFixed(1)} km away
-                  {nearest.destination && ` · ${nearest.destination}`}
+                  {nearest.destination ? ` · ${nearest.destination}` : ""}
                 </p>
               </div>
             ) : (
               <p className="text-slate-500 text-sm mb-3">No live bus nearby</p>
             )}
 
-            {/* Key scheduled times */}
             {stop.keyTimes && (
               <div className="border-t border-slate-700 pt-2 mt-1">
                 {stop.keyTimes.map((t) => (
-                  <div
-                    key={t}
-                    className="flex justify-between text-sm text-slate-300"
-                  >
+                  <div key={t} className="flex justify-between text-sm text-slate-300">
                     <span>{t}</span>
                     <span className="text-amber-400/90 text-xs font-medium">
                       SCHEDULED
