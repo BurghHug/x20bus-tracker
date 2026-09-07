@@ -35,7 +35,6 @@ export async function GET() {
       updated: new Date().toISOString(),
       count: vehicles.length,
       vehicles,
-      directionFilter: "towards Stratford",
     });
   } catch (err) {
     console.error("BODS fetch error:", err);
@@ -56,6 +55,7 @@ function parseX20Vehicles(xml: string) {
     destination?: string;
     recordedAt?: string;
     towardsStratford: boolean;
+    towardsSolihull: boolean;
   }> = [];
 
   const blocks = xml.split("<VehicleActivity>").slice(1);
@@ -82,14 +82,17 @@ function parseX20Vehicles(xml: string) {
     const destination = (destMatch?.[1] || "").trim();
     const destLower = destination.toLowerCase();
 
-    // Decide if this vehicle is heading towards Stratford
     const towardsStratford =
       destLower.includes("stratford") ||
       destLower.includes("maybird") ||
       destLower.includes("wood street") ||
-      destLower.includes("bridge street") ||
       destLower.includes("natwest") ||
-      (!destLower.includes("solihull") && !destLower.includes("shirley"));
+      destLower.includes("bridge street");
+
+    const towardsSolihull =
+      destLower.includes("solihull") ||
+      destLower.includes("shirley") ||
+      destLower.includes("henley");
 
     vehicles.push({
       id: vehicleRefMatch?.[1] || `${lat},${lon}`,
@@ -100,14 +103,9 @@ function parseX20Vehicles(xml: string) {
       destination,
       recordedAt: recordedMatch?.[1],
       towardsStratford,
+      towardsSolihull,
     });
   }
-
-  // Prefer vehicles going towards Stratford
-  vehicles.sort((a, b) => {
-    if (a.towardsStratford === b.towardsStratford) return 0;
-    return a.towardsStratford ? -1 : 1;
-  });
 
   return vehicles;
 }
