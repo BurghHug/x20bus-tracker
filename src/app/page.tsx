@@ -33,6 +33,11 @@ interface BusData {
   count?: number;
 }
 
+interface RoutedEta {
+  minutes: number;
+  miles: number;
+}
+
 function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number) {
   const R = 6371;
   const dLat = ((lat2 - lat1) * Math.PI) / 180;
@@ -56,11 +61,10 @@ function estimateMinutes(distanceMiles: number) {
 
 // Initial compass bearing (0-360°) travelling from point 1 to point 2.
 // Used to check whether a vehicle's reported heading actually points
-// toward a stop, or away from it. A bus that has looped through a school
-// driveway and is heading back onto the main road can be very close to
-// the stop while moving away from it — straight-line distance alone can't
-// tell those two situations apart, which is what was causing "2 min away"
-// readings for buses that had already been and gone.
+// toward a stop, or away from it — a bus that has looped through a school
+// driveway and is heading back onto the main road can be very close to a
+// stop while moving away from it, which straight-line distance alone
+// can't distinguish.
 function bearingTo(lat1: number, lon1: number, lat2: number, lon2: number) {
   const toRad = (d: number) => (d * Math.PI) / 180;
   const y = Math.sin(toRad(lon2 - lon1)) * Math.cos(toRad(lat2));
@@ -75,11 +79,50 @@ function angleDiff(a: number, b: number) {
   return d > 180 ? 360 - d : d;
 }
 
+// Real road-network routing via OSRM's public demo server — genuine
+// driving distance/time along actual roads, rather than straight-line
+// distance divided by a flat assumed speed. This is what makes the ETA a
+// true prediction rather than a rough guess: it accounts for the real
+// road layout (including a stop like the school driveway loop), even
+// though it still doesn't know about live traffic conditions.
+//
+// The demo server is free and requires no API key, but its usage policy
+// asks for no more than ~1 request/second and offers no uptime guarantee
+// — reasonable for a handful of personal requests every 20s, so callers
+// of this function should be sequenced with a small delay between them
+// rather than fired all at once.
+async function fetchDrivingEta(
+  fromLat: number,
+  fromLon: number,
+  toLat: number,
+  toLon: number
+): Promise<RoutedEta | null> {
+  try {
+    const url = `https://router.project-osrm.org/route/v1/driving/${fromLon},${fromLat};${toLon},${toLat}?overview=false`;
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const json = await res.json();
+    const route = json?.routes?.[0];
+    if (!route || typeof route.duration !== "number") return null;
+    return {
+      minutes: Math.max(0, Math.round(route.duration / 60)),
+      miles: route.distance ? kmToMiles(route.distance / 1000) : 0,
+    };
+  } catch {
+    return null; // routing is a refinement, not a requirement — fall back silently
+  }
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export default function Home() {
   const [direction, setDirection] = useState<Direction>("stratford");
   const [data, setData] = useState<BusData | null>(null);
   const [loading, setLoading] = useState(true);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
+  const [routedEtas, setRoutedEtas] = useState<Record<string, RoutedEta | null>>({});
 
   async function load() {
     try {
@@ -108,9 +151,9 @@ export default function Home() {
     ) || [];
 
   const stopCards = stops.map((stop) => {
-    // For every candidate vehicle, work out both its distance to this stop
-    // and — where a bearing was reported — whether it's actually heading
-    // toward the stop or away from it.
+    // For every candidate vehicle, work out both its straight-line
+    // distance to this stop and — where a bearing was reported — whether
+    // it's actually heading toward the stop or away from it.
     const candidates = filteredBuses.map((v) => {
       const distKm = haversineKm(stop.lat, stop.lon, v.lat, v.lon);
       const distanceMiles = kmToMiles(distKm);
@@ -123,10 +166,8 @@ export default function Home() {
     });
 
     // Prefer the nearest vehicle that's approaching (or has unknown
-    // heading — better to show a possibly-rough live figure than hide it
-    // just because bearing wasn't reported). Only fall through to a
-    // clearly-departing vehicle so we can say it's just gone, rather than
-    // silently showing nothing.
+    // heading). Only fall through to a clearly-departing vehicle so we can
+    // say it's just gone, rather than showing nothing at all.
     const inbound = candidates
       .filter((c) => c.approaching !== false)
       .sort((a, b) => a.distanceMiles - b.distanceMiles);
@@ -137,16 +178,70 @@ export default function Home() {
     const best = inbound[0] || null;
     const justPassed = !best && departing[0] ? departing[0] : null;
 
-    const minutes = best ? estimateMinutes(best.distanceMiles) : null;
+    // Straight-line estimate — always available instantly, used as the
+    // fallback while a real routed ETA is being fetched (or if it fails).
+    const straightLineMinutes = best ? estimateMinutes(best.distanceMiles) : null;
+
+    const routed = best ? routedEtas[stop.id] : undefined;
 
     return {
       stop,
       nearest: best?.v || null,
-      distanceMiles: best ? best.distanceMiles : null,
-      minutes,
+      distanceMiles: routed ? routed.miles : best ? best.distanceMiles : null,
+      minutes: routed ? routed.minutes : straightLineMinutes,
+      isRouted: !!routed,
       justPassedMiles: justPassed ? justPassed.distanceMiles : null,
     };
   });
+
+  // After each poll, refine the straight-line estimates into real
+  // road-routed ETAs for whichever vehicle is actually approaching each
+  // stop in the current direction. Sequenced with a short gap between
+  // requests to stay well within OSRM's public demo server's fair-use
+  // guidance, rather than firing all four at once.
+  useEffect(() => {
+    let cancelled = false;
+
+    async function refineEtas() {
+      const currentStops = direction === "stratford" ? STOPS_STRATFORD : STOPS_SOLIHULL;
+      const currentBuses =
+        data?.vehicles?.filter((v) =>
+          direction === "stratford" ? v.towardsStratford : v.towardsSolihull
+        ) || [];
+
+      for (const stop of currentStops) {
+        if (cancelled) return;
+
+        const candidates = currentBuses.map((v) => {
+          const distanceMiles = kmToMiles(haversineKm(stop.lat, stop.lon, v.lat, v.lon));
+          let approaching: boolean | null = null;
+          if (v.bearing != null) {
+            const toStop = bearingTo(v.lat, v.lon, stop.lat, stop.lon);
+            approaching = angleDiff(v.bearing, toStop) <= 90;
+          }
+          return { v, distanceMiles, approaching };
+        });
+        const best = candidates
+          .filter((c) => c.approaching !== false)
+          .sort((a, b) => a.distanceMiles - b.distanceMiles)[0];
+
+        if (!best) continue; // nothing to route — no live vehicle for this stop right now
+
+        const eta = await fetchDrivingEta(best.v.lat, best.v.lon, stop.lat, stop.lon);
+        if (!cancelled) {
+          setRoutedEtas((prev) => ({ ...prev, [stop.id]: eta }));
+        }
+        await sleep(350); // stay comfortably under ~1 req/sec across the batch
+      }
+    }
+
+    if (data?.vehicles?.length) refineEtas();
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data, direction]);
 
   const now = new Date();
   const hour = now.getHours();
@@ -240,7 +335,7 @@ export default function Home() {
       )}
 
       <div className="space-y-3">
-        {stopCards.map(({ stop, nearest, distanceMiles, minutes, justPassedMiles }) => (
+        {stopCards.map(({ stop, nearest, distanceMiles, minutes, isRouted, justPassedMiles }) => (
           <article
             key={stop.id}
             className="rounded-2xl bg-slate-800/80 border border-slate-700 p-4"
@@ -268,6 +363,11 @@ export default function Home() {
                 </p>
                 <p className="text-xs text-slate-400">
                   {distanceMiles!.toFixed(1)} miles away
+                  {isRouted ? (
+                    <span className="text-emerald-500/80"> · road-routed</span>
+                  ) : (
+                    <span className="text-slate-500"> · straight-line estimate</span>
+                  )}
                 </p>
               </div>
             ) : justPassedMiles !== null ? (
@@ -302,7 +402,7 @@ export default function Home() {
       </div>
 
       <p className="text-center text-xs text-slate-600 mt-8">
-        Data from UK Bus Open Data Service · Refreshes every 20s
+        Data from UK Bus Open Data Service · Routing via OSRM · Refreshes every 20s
       </p>
     </main>
   );
