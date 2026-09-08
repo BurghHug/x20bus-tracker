@@ -213,6 +213,11 @@ export default function Home() {
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
   const [routedEtas, setRoutedEtas] = useState<Record<string, RoutedEta | null>>({});
   const [now, setNow] = useState(new Date());
+  const [expandedStops, setExpandedStops] = useState<Record<string, boolean>>({});
+
+  function toggleDetails(stopId: string) {
+    setExpandedStops((prev) => ({ ...prev, [stopId]: !prev[stopId] }));
+  }
 
   async function load() {
     try {
@@ -459,97 +464,109 @@ export default function Home() {
       )}
 
       <div className="space-y-3">
-        {stopCards.map(({ stop, nearest, distanceMiles, minutes, isRouted, justPassedMiles, delay, age }) => (
-          <article
-            key={stop.id}
-            className="rounded-2xl bg-slate-800/80 border border-slate-700 p-4"
-          >
-            <div className="flex justify-between items-start mb-2">
-              <h2 className="font-semibold text-base leading-tight">
-                {stop.shortName}
-              </h2>
-              {nearest && (
-                <span className="text-[10px] font-medium bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded-full">
-                  LIVE
-                </span>
-              )}
-              {!nearest && justPassedMiles !== null && (
-                <span className="text-[10px] font-medium bg-slate-500/20 text-slate-400 px-2 py-0.5 rounded-full">
-                  PASSED
-                </span>
-              )}
-            </div>
+        {stopCards.map(({ stop, nearest, distanceMiles, minutes, isRouted, justPassedMiles, delay, age }) => {
+          const isExpanded = !!expandedStops[stop.id];
+          const hasDetails = !!nearest; // only live cards have anything worth expanding
+          return (
+            <article
+              key={stop.id}
+              className="rounded-2xl bg-slate-800/80 border border-slate-700 p-4"
+            >
+              <div className="flex justify-between items-start mb-2">
+                <h2 className="font-semibold text-base leading-tight">
+                  {stop.shortName}
+                </h2>
+                {nearest && (
+                  <span className="text-[10px] font-medium bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded-full">
+                    LIVE
+                  </span>
+                )}
+                {!nearest && justPassedMiles !== null && (
+                  <span className="text-[10px] font-medium bg-slate-500/20 text-slate-400 px-2 py-0.5 rounded-full">
+                    PASSED
+                  </span>
+                )}
+              </div>
 
-            {nearest && minutes !== null ? (
-              <div className="mb-3">
-                <p className="text-2xl font-bold text-emerald-400">
-                  {minutes <= 1 ? "Due" : `${minutes} min`}
-                </p>
-                <p className="text-xs text-slate-400">
-                  {distanceMiles!.toFixed(1)} miles away
-                  {isRouted ? (
-                    <span className="text-emerald-500/80"> · road-routed</span>
-                  ) : (
-                    <span className="text-slate-500"> · straight-line estimate</span>
+              {nearest && minutes !== null ? (
+                <div className="mb-2">
+                  <p className="text-3xl font-bold text-emerald-400">
+                    {minutes <= 1 ? "Due" : `${minutes} min`}
+                  </p>
+
+                  {/* Kept prominent, not hidden behind Details — this is the
+                      one thing that's genuinely new versus a paper timetable,
+                      given the whole point is that this bus runs late. */}
+                  {delay && (
+                    <p
+                      className={`text-sm font-medium mt-0.5 ${
+                        delay.tone === "late"
+                          ? "text-red-400"
+                          : delay.tone === "early"
+                          ? "text-sky-400"
+                          : "text-emerald-400"
+                      }`}
+                    >
+                      {delay.text} vs schedule
+                    </p>
                   )}
-                </p>
-
-                {delay && (
-                  <p
-                    className={`text-xs font-medium mt-1 ${
-                      delay.tone === "late"
-                        ? "text-red-400"
-                        : delay.tone === "early"
-                        ? "text-sky-400"
-                        : "text-emerald-400"
-                    }`}
-                  >
-                    {delay.text} vs schedule
+                </div>
+              ) : justPassedMiles !== null ? (
+                <div className="mb-2">
+                  <p className="text-lg font-semibold text-slate-400">
+                    Just passed
                   </p>
-                )}
-
-                {age && (
-                  <p className={`text-[11px] mt-1 ${age.stale ? "text-amber-400" : "text-slate-500"}`}>
-                    {age.stale ? "⚠ " : ""}Position from {age.text}
-                    {age.stale ? " — may be out of date" : ""}
-                  </p>
-                )}
-
-                {nearest.id && (
-                  <p className="text-[10px] text-slate-600 mt-1">
-                    Vehicle #{nearest.id}
-                  </p>
-                )}
-              </div>
-            ) : justPassedMiles !== null ? (
-              <div className="mb-3">
-                <p className="text-lg font-semibold text-slate-400">
-                  Just passed
+                </div>
+              ) : (
+                <p className="text-slate-500 text-sm mb-2">
+                  No bus nearby
                 </p>
-                <p className="text-xs text-slate-500">
-                  Nearest bus ({justPassedMiles.toFixed(1)} mi away) is heading away from this stop
-                </p>
-              </div>
-            ) : (
-              <p className="text-slate-500 text-sm mb-3">
-                No bus nearby
-              </p>
-            )}
+              )}
 
-            {stop.keyTimes && (
-              <div className="border-t border-slate-700 pt-2 mt-1">
-                {stop.keyTimes.map((t) => (
-                  <div key={t} className="flex justify-between text-sm text-slate-300">
-                    <span>{t}</span>
-                    <span className="text-amber-400/90 text-xs font-medium">
-                      SCHEDULED
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </article>
-        ))}
+              {hasDetails && (
+                <button
+                  onClick={() => toggleDetails(stop.id)}
+                  className="text-[11px] text-slate-500 hover:text-slate-300 transition mb-1"
+                >
+                  {isExpanded ? "Hide details ▾" : "Details ▸"}
+                </button>
+              )}
+
+              {hasDetails && isExpanded && (
+                <div className="text-[11px] text-slate-500 space-y-0.5 mb-2 pl-0.5">
+                  <p>
+                    {distanceMiles!.toFixed(1)} miles away
+                    {isRouted ? (
+                      <span className="text-emerald-500/70"> · road-routed</span>
+                    ) : (
+                      <span> · straight-line estimate</span>
+                    )}
+                  </p>
+                  {age && (
+                    <p className={age.stale ? "text-amber-400" : ""}>
+                      {age.stale ? "⚠ " : ""}Position from {age.text}
+                      {age.stale ? " — may be out of date" : ""}
+                    </p>
+                  )}
+                  {nearest?.id && <p>Vehicle #{nearest.id}</p>}
+                </div>
+              )}
+
+              {stop.keyTimes && (
+                <div className="border-t border-slate-700 pt-2 mt-1">
+                  {stop.keyTimes.map((t) => (
+                    <div key={t} className="flex justify-between text-sm text-slate-300">
+                      <span>{t}</span>
+                      <span className="text-amber-400/90 text-xs font-medium">
+                        SCHEDULED
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </article>
+          );
+        })}
       </div>
 
       <p className="text-center text-xs text-slate-600 mt-8">
