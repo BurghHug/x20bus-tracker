@@ -1,7 +1,6 @@
 "use client";
-
 import { useEffect, useState } from "react";
-import { MapContainer, TileLayer, Marker, Popup, CircleMarker } from "react-leaflet";
+import { MapContainer, TileLayer, Marker, Popup, CircleMarker, useMap } from "react-leaflet";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { STOPS_STRATFORD, STOPS_SOLIHULL, Direction } from "@/lib/stops";
@@ -31,9 +30,43 @@ interface Props {
   direction?: Direction;
 }
 
+// Keeps the map framed around wherever the stops AND any live buses
+// actually are, rather than a fixed center/zoom. Without this, a bus
+// sitting outside the originally-chosen view is simply invisible unless
+// someone happens to manually pan/zoom to find it -- which looks
+// indistinguishable from "no buses" or "lost connection" even though the
+// data is right there.
+function FitToMarkers({
+  stops,
+  vehicles,
+}: {
+  stops: { lat: number; lon: number }[];
+  vehicles: Vehicle[];
+}) {
+  const map = useMap();
+
+  useEffect(() => {
+    const points: [number, number][] = [
+      ...stops.map((s): [number, number] => [s.lat, s.lon]),
+      ...vehicles.map((v): [number, number] => [v.lat, v.lon]),
+    ];
+    if (points.length === 0) return;
+
+    if (points.length === 1) {
+      map.setView(points[0], 13);
+      return;
+    }
+
+    const bounds = L.latLngBounds(points);
+    map.fitBounds(bounds, { padding: [32, 32], maxZoom: 13 });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [JSON.stringify(stops), JSON.stringify(vehicles.map((v) => [v.id, v.lat, v.lon]))]);
+
+  return null;
+}
+
 export default function BusMap({ vehicles, direction = "stratford" }: Props) {
   const [mounted, setMounted] = useState(false);
-
   useEffect(() => {
     setMounted(true);
   }, []);
@@ -61,7 +94,7 @@ export default function BusMap({ vehicles, direction = "stratford" }: Props) {
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
         />
-
+        <FitToMarkers stops={stops} vehicles={vehicles} />
         {stops.map((stop) => (
           <CircleMarker
             key={stop.id}
@@ -77,7 +110,6 @@ export default function BusMap({ vehicles, direction = "stratford" }: Props) {
             <Popup>{stop.shortName}</Popup>
           </CircleMarker>
         ))}
-
         {vehicles.map((v) => (
           <Marker key={v.id} position={[v.lat, v.lon]} icon={busIcon}>
             <Popup>
