@@ -165,6 +165,20 @@ function nearestScheduledTime(keyTimes: string[] | undefined, now: Date): Date |
   return best;
 }
 
+// A plain "in Xh Ym" / "Xh Ym ago" relative to right now — makes it clear
+// at a glance whether a scheduled time is coming up soon or is hours away
+// (or already gone), rather than every SCHEDULED entry looking equally
+// relevant regardless of how far off it actually is.
+function formatRelative(scheduled: Date, now: Date): string {
+  const diffMin = Math.round((scheduled.getTime() - now.getTime()) / 60000);
+  if (Math.abs(diffMin) < 1) return "now";
+  const abs = Math.abs(diffMin);
+  const h = Math.floor(abs / 60);
+  const m = abs % 60;
+  const span = h > 0 ? `${h}h ${m}m` : `${m}m`;
+  return diffMin > 0 ? `in ${span}` : `${span} ago`;
+}
+
 function formatDelay(
   predicted: Date,
   scheduled: Date
@@ -290,6 +304,33 @@ export default function Home() {
     const best = inbound[0] || null;
     const justPassed = !best && departing[0] ? departing[0] : null;
 
+    // When neither of the above applies, work out *why* — so "2 buses
+    // detected but nothing shown" is diagnosable instead of a mystery.
+    // This looks at the single nearest candidate overall, even ones that
+    // got excluded, purely to explain the exclusion.
+    let noMatchReason: string | null = null;
+    if (!best && !justPassed) {
+      const allCandidates = filteredBuses.map((v) => ({
+        v,
+        distanceMiles: kmToMiles(haversineKm(stop.lat, stop.lon, v.lat, v.lon)),
+        ageSec: v.recordedAt
+          ? Math.round((now.getTime() - new Date(v.recordedAt).getTime()) / 1000)
+          : null,
+      }));
+      const closest = allCandidates.sort((a, b) => a.distanceMiles - b.distanceMiles)[0];
+      if (closest) {
+        if (closest.ageSec !== null && closest.ageSec > MAX_POSITION_AGE_SEC) {
+          noMatchReason = `Nearest bus on this line (#${closest.v.id}) was last seen ${Math.round(
+            closest.ageSec / 60
+          )}m ago — too stale to treat as live.`;
+        } else {
+          noMatchReason = `Nearest bus on this line (#${closest.v.id}, ${closest.distanceMiles.toFixed(
+            1
+          )} mi away) doesn't appear to be on its way to this stop — likely the regular commercial X20 rather than this school working.`;
+        }
+      }
+    }
+
     const straightLineMinutes = best ? estimateMinutes(best.distanceMiles) : null;
     const routed = best ? routedEtas[stop.id] : undefined;
     const minutes = routed ? routed.minutes : straightLineMinutes;
@@ -314,6 +355,7 @@ export default function Home() {
       justPassedMiles: justPassed ? justPassed.distanceMiles : null,
       delay,
       age,
+      noMatchReason,
     };
   });
 
@@ -464,9 +506,12 @@ export default function Home() {
       )}
 
       <div className="space-y-3">
-        {stopCards.map(({ stop, nearest, distanceMiles, minutes, isRouted, justPassedMiles, delay, age }) => {
+        {stopCards.map(({ stop, nearest, distanceMiles, minutes, isRouted, justPassedMiles, delay, age, noMatchReason }) => {
           const isExpanded = !!expandedStops[stop.id];
-          const hasDetails = !!nearest; // only live cards have anything worth expanding
+          // Live cards get distance/routing/vehicle details; "No bus
+          // nearby" cards get a "Why?" explanation when we have one —
+          // either way, there's something worth being able to expand.
+          const hasDetails = !!nearest || !!noMatchReason;
           return (
             <article
               key={stop.id}
@@ -528,40 +573,63 @@ export default function Home() {
                   onClick={() => toggleDetails(stop.id)}
                   className="text-[11px] text-slate-500 hover:text-slate-300 transition mb-1"
                 >
-                  {isExpanded ? "Hide details ▾" : "Details ▸"}
+                  {isExpanded ? "Hide details ▾" : nearest ? "Details ▸" : "Why? ▸"}
                 </button>
               )}
 
               {hasDetails && isExpanded && (
                 <div className="text-[11px] text-slate-500 space-y-0.5 mb-2 pl-0.5">
-                  <p>
-                    {distanceMiles!.toFixed(1)} miles away
-                    {isRouted ? (
-                      <span className="text-emerald-500/70"> · road-routed</span>
-                    ) : (
-                      <span> · straight-line estimate</span>
-                    )}
-                  </p>
-                  {age && (
-                    <p className={age.stale ? "text-amber-400" : ""}>
-                      {age.stale ? "⚠ " : ""}Position from {age.text}
-                      {age.stale ? " — may be out of date" : ""}
-                    </p>
+                  {nearest ? (
+                    <>
+                      <p>
+                        {distanceMiles!.toFixed(1)} miles away
+                        {isRouted ? (
+                          <span className="text-emerald-500/70"> · road-routed</span>
+                        ) : (
+                          <span> · straight-line estimate</span>
+                        )}
+                      </p>
+                      {age && (
+                        <p className={age.stale ? "text-amber-400" : ""}>
+                          {age.stale ? "⚠ " : ""}Position from {age.text}
+                          {age.stale ? " — may be out of date" : ""}
+                        </p>
+                      )}
+                      {nearest.id && <p>Vehicle #{nearest.id}</p>}
+                    </>
+                  ) : (
+                    noMatchReason && <p>{noMatchReason}</p>
                   )}
-                  {nearest?.id && <p>Vehicle #{nearest.id}</p>}
                 </div>
               )}
 
               {stop.keyTimes && (
                 <div className="border-t border-slate-700 pt-2 mt-1">
-                  {stop.keyTimes.map((t) => (
-                    <div key={t} className="flex justify-between text-sm text-slate-300">
-                      <span>{t}</span>
-                      <span className="text-amber-400/90 text-xs font-medium">
-                        SCHEDULED
-                      </span>
-                    </div>
-                  ))}
+                  {stop.keyTimes.map((t) => {
+                    const scheduledDate = parseTimeToday(t, now);
+                    const relative = scheduledDate ? formatRelative(scheduledDate, now) : null;
+                    const imminent =
+                      scheduledDate !== null &&
+                      Math.abs(scheduledDate.getTime() - now.getTime()) <= MAX_SCHEDULE_COMPARISON_MIN * 60000;
+                    return (
+                      <div
+                        key={t}
+                        className={`flex justify-between text-sm ${imminent ? "text-slate-200" : "text-slate-500"}`}
+                      >
+                        <span>
+                          {t}
+                          {relative && (
+                            <span className={imminent ? "text-slate-400" : "text-slate-600"}> · {relative}</span>
+                          )}
+                        </span>
+                        <span
+                          className={`text-xs font-medium ${imminent ? "text-amber-400/90" : "text-slate-600"}`}
+                        >
+                          SCHEDULED
+                        </span>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </article>
