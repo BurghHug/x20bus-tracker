@@ -79,6 +79,31 @@ function angleDiff(a: number, b: number) {
   return d > 180 ? 360 - d : d;
 }
 
+// When a vehicle doesn't report a bearing, we can't directly tell whether
+// it's heading toward a given stop or away from it. As a fallback, this
+// estimates the vehicle's rough position along the route by finding which
+// stop (in order) it's currently closest to — a vehicle sitting nearest to
+// stop 3 has almost certainly already passed stops 1 and 2, regardless of
+// straight-line distance to them. Without this, a single no-bearing
+// vehicle near the end of the route can appear to be "approaching" every
+// earlier stop simultaneously, purely because it's geometrically closer
+// to some of them than others.
+function estimateRouteOrder(
+  v: { lat: number; lon: number },
+  stopsInDirection: { lat: number; lon: number; order: number }[]
+): number {
+  let bestOrder = stopsInDirection[0]?.order ?? 0;
+  let bestDist = Infinity;
+  for (const s of stopsInDirection) {
+    const d = haversineKm(s.lat, s.lon, v.lat, v.lon);
+    if (d < bestDist) {
+      bestDist = d;
+      bestOrder = s.order;
+    }
+  }
+  return bestOrder;
+}
+
 // Real road-network routing via OSRM's public demo server — genuine
 // driving distance/time along actual roads, rather than straight-line
 // distance divided by a flat assumed speed. Free, no API key, but its
@@ -150,6 +175,22 @@ function formatDelay(
   return { text: "On time", tone: "onTime" };
 }
 
+// A position is only treated as "live" if it was reported reasonably
+// recently. Without this, a stale last-known GPS fix from hours earlier
+// (e.g. after service has finished for the day) gets shown as an active
+// bus with a live countdown — technically derived from real data, but
+// meaningless. 5 minutes is a judgement call, not a documented BODS
+// standard, and can be tightened or loosened based on how the feed
+// actually behaves in practice.
+const MAX_POSITION_AGE_SEC = 300;
+
+// Comparing a live position against a scheduled time that isn't even
+// close to "now" produces a technically-correct but nonsensical result
+// (e.g. "Running 377 min late" at 9:30pm against a 15:30 schedule that
+// finished hours ago). Only show a delay comparison when the scheduled
+// time is within this window of right now.
+const MAX_SCHEDULE_COMPARISON_MIN = 90;
+
 // How old the bus's last reported position is. A large age can mean the
 // bus's AVL unit has stopped reporting (signal loss, hardware issue, or
 // the vehicle has gone off-duty) rather than that it's genuinely
@@ -207,19 +248,32 @@ export default function Home() {
     ) || [];
 
   const stopCards = stops.map((stop) => {
-    // For every candidate vehicle, work out both its straight-line
-    // distance to this stop and — where a bearing was reported — whether
-    // it's actually heading toward the stop or away from it.
-    const candidates = filteredBuses.map((v) => {
-      const distKm = haversineKm(stop.lat, stop.lon, v.lat, v.lon);
-      const distanceMiles = kmToMiles(distKm);
-      let approaching: boolean | null = null; // null = heading unknown
-      if (v.bearing != null) {
-        const toStop = bearingTo(v.lat, v.lon, stop.lat, stop.lon);
-        approaching = angleDiff(v.bearing, toStop) <= 90;
-      }
-      return { v, distanceMiles, approaching };
-    });
+    // For every candidate vehicle, work out its distance, whether it's
+    // heading toward the stop or away, and how old its reported position
+    // is. Stale positions (the bus hasn't reported in a while — often
+    // because service has ended, or it's gone out of signal) are dropped
+    // entirely rather than shown as a misleadingly "live" countdown.
+    const candidates = filteredBuses
+      .map((v) => {
+        const distKm = haversineKm(stop.lat, stop.lon, v.lat, v.lon);
+        const distanceMiles = kmToMiles(distKm);
+        let approaching: boolean | null = null; // null = heading unknown
+        if (v.bearing != null) {
+          const toStop = bearingTo(v.lat, v.lon, stop.lat, stop.lon);
+          approaching = angleDiff(v.bearing, toStop) <= 90;
+        } else {
+          // No bearing reported — fall back to route order: only treat
+          // this stop as still-ahead if the vehicle's estimated position
+          // along the route hasn't already reached (or passed) it.
+          const vehicleOrder = estimateRouteOrder(v, stops);
+          approaching = stop.order >= vehicleOrder;
+        }
+        const ageSec = v.recordedAt
+          ? Math.round((now.getTime() - new Date(v.recordedAt).getTime()) / 1000)
+          : null;
+        return { v, distanceMiles, approaching, ageSec };
+      })
+      .filter((c) => c.ageSec === null || c.ageSec <= MAX_POSITION_AGE_SEC);
 
     const inbound = candidates
       .filter((c) => c.approaching !== false)
@@ -237,7 +291,13 @@ export default function Home() {
 
     const predictedArrival = best && minutes !== null ? new Date(now.getTime() + minutes * 60000) : null;
     const scheduledTarget = nearestScheduledTime(stop.keyTimes, now);
-    const delay = predictedArrival && scheduledTarget ? formatDelay(predictedArrival, scheduledTarget) : null;
+    const scheduleIsCurrentlyPlausible =
+      scheduledTarget !== null &&
+      Math.abs(scheduledTarget.getTime() - now.getTime()) <= MAX_SCHEDULE_COMPARISON_MIN * 60000;
+    const delay =
+      predictedArrival && scheduledTarget && scheduleIsCurrentlyPlausible
+        ? formatDelay(predictedArrival, scheduledTarget)
+        : null;
     const age = best ? formatAge(best.v.recordedAt, now) : null;
 
     return {
@@ -268,15 +328,24 @@ export default function Home() {
       for (const stop of currentStops) {
         if (cancelled) return;
 
-        const candidates = currentBuses.map((v) => {
-          const distanceMiles = kmToMiles(haversineKm(stop.lat, stop.lon, v.lat, v.lon));
-          let approaching: boolean | null = null;
-          if (v.bearing != null) {
-            const toStop = bearingTo(v.lat, v.lon, stop.lat, stop.lon);
-            approaching = angleDiff(v.bearing, toStop) <= 90;
-          }
-          return { v, distanceMiles, approaching };
-        });
+        const candidates = currentBuses
+          .map((v) => {
+            const distanceMiles = kmToMiles(haversineKm(stop.lat, stop.lon, v.lat, v.lon));
+            let approaching: boolean | null = null;
+            if (v.bearing != null) {
+              const toStop = bearingTo(v.lat, v.lon, stop.lat, stop.lon);
+              approaching = angleDiff(v.bearing, toStop) <= 90;
+            } else {
+              const vehicleOrder = estimateRouteOrder(v, currentStops);
+              approaching = stop.order >= vehicleOrder;
+            }
+            const ageSec = v.recordedAt
+              ? Math.round((Date.now() - new Date(v.recordedAt).getTime()) / 1000)
+              : null;
+            return { v, distanceMiles, approaching, ageSec };
+          })
+          .filter((c) => c.ageSec === null || c.ageSec <= MAX_POSITION_AGE_SEC);
+
         const best = candidates
           .filter((c) => c.approaching !== false)
           .sort((a, b) => a.distanceMiles - b.distanceMiles)[0];
@@ -443,6 +512,12 @@ export default function Home() {
                   <p className={`text-[11px] mt-1 ${age.stale ? "text-amber-400" : "text-slate-500"}`}>
                     {age.stale ? "⚠ " : ""}Position from {age.text}
                     {age.stale ? " — may be out of date" : ""}
+                  </p>
+                )}
+
+                {nearest.id && (
+                  <p className="text-[10px] text-slate-600 mt-1">
+                    Vehicle #{nearest.id}
                   </p>
                 )}
               </div>
