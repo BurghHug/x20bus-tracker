@@ -13,28 +13,30 @@ export async function GET() {
       { status: 500 }
     );
   }
-
   try {
     const bbox = `${ROUTE_BBOX.minLon},${ROUTE_BBOX.minLat},${ROUTE_BBOX.maxLon},${ROUTE_BBOX.maxLat}`;
     const url = `https://data.bus-data.dft.gov.uk/api/v1/datafeed?boundingBox=${bbox}&api_key=${BODS_KEY}`;
-
     const res = await fetch(url, {
       headers: { "User-Agent": "X20-Tracker/1.0" },
       cache: "no-store",
     });
-
     if (!res.ok) {
       const body = await res.text().catch(() => "");
       throw new Error(`BODS responded ${res.status}${body ? `: ${body.slice(0, 200)}` : ""}`);
     }
-
     const xml = await res.text();
-    const vehicles = parseX20Vehicles(xml);
-
+    const { vehicles, allLineRefsSeen } = parseVehicles(xml);
     return NextResponse.json({
       updated: new Date().toISOString(),
       count: vehicles.length,
       vehicles,
+      // Temporary diagnostic: every distinct line identifier BODS reported
+      // within our bounding box, regardless of whether it matched X20/X21.
+      // Check this during the real 15:19-15:56 window to confirm the
+      // school-run working is actually broadcasting under exactly "X20" or
+      // "X21", rather than a slightly different string that our exact-match
+      // filter would silently miss.
+      allLineRefsSeen,
     });
   } catch (err) {
     console.error("BODS fetch error:", err);
@@ -45,7 +47,7 @@ export async function GET() {
   }
 }
 
-function parseX20Vehicles(xml: string) {
+function parseVehicles(xml: string) {
   const vehicles: Array<{
     id: string;
     lat: number;
@@ -57,14 +59,16 @@ function parseX20Vehicles(xml: string) {
     towardsStratford: boolean;
     towardsSolihull: boolean;
   }> = [];
+  const allLineRefsSeen = new Set<string>();
 
   const blocks = xml.split("<VehicleActivity>").slice(1);
-
   for (const block of blocks) {
     const lineMatch =
       block.match(/<LineRef>([^<]+)<\/LineRef>/i) ||
       block.match(/<PublishedLineName>([^<]+)<\/PublishedLineName>/i);
     const line = (lineMatch?.[1] || "").trim();
+
+    if (line) allLineRefsSeen.add(line);
 
     if (!/^X20$/i.test(line) && !/^X21$/i.test(line)) continue;
 
@@ -81,14 +85,12 @@ function parseX20Vehicles(xml: string) {
 
     const destination = (destMatch?.[1] || "").trim();
     const destLower = destination.toLowerCase();
-
     const towardsStratford =
       destLower.includes("stratford") ||
       destLower.includes("maybird") ||
       destLower.includes("wood street") ||
       destLower.includes("natwest") ||
       destLower.includes("bridge street");
-
     const towardsSolihull =
       destLower.includes("solihull") ||
       destLower.includes("shirley") ||
@@ -107,5 +109,5 @@ function parseX20Vehicles(xml: string) {
     });
   }
 
-  return vehicles;
+  return { vehicles, allLineRefsSeen: Array.from(allLineRefsSeen).sort() };
 }
