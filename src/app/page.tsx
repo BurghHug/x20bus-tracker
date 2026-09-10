@@ -198,6 +198,17 @@ function formatDelay(
 // actually behaves in practice.
 const MAX_POSITION_AGE_SEC = 300;
 
+// When a vehicle doesn't report a bearing, we fall back to guessing its
+// direction from route order (estimateRouteOrder above). That guess is
+// only meaningful when the vehicle is reasonably close to the stop in
+// question — a vehicle many miles away, on what's plausibly a completely
+// different journey (e.g. the regular commercial X20 sitting in
+// Stratford), can end up "nearest" to one of our stops purely by
+// elimination, with no real basis for claiming it's approaching or has
+// passed that specific stop. Beyond this distance, the fallback simply
+// declines to guess rather than asserting something specific and wrong.
+const MAX_FALLBACK_GUESS_DISTANCE_MILES = 3.5;
+
 // Comparing a live position against a scheduled time that isn't even
 // close to "now" produces a technically-correct but nonsensical result
 // (e.g. "Running 377 min late" at 9:30pm against a 15:30 schedule that
@@ -277,6 +288,7 @@ export default function Home() {
         const distKm = haversineKm(stop.lat, stop.lon, v.lat, v.lon);
         const distanceMiles = kmToMiles(distKm);
         let approaching: boolean | null = null; // null = heading unknown
+        let usedFallback = false;
         if (v.bearing != null) {
           const toStop = bearingTo(v.lat, v.lon, stop.lat, stop.lon);
           approaching = angleDiff(v.bearing, toStop) <= 90;
@@ -284,15 +296,19 @@ export default function Home() {
           // No bearing reported — fall back to route order: only treat
           // this stop as still-ahead if the vehicle's estimated position
           // along the route hasn't already reached (or passed) it.
+          usedFallback = true;
           const vehicleOrder = estimateRouteOrder(v, stops);
           approaching = stop.order >= vehicleOrder;
         }
         const ageSec = v.recordedAt
           ? Math.round((now.getTime() - new Date(v.recordedAt).getTime()) / 1000)
           : null;
-        return { v, distanceMiles, approaching, ageSec };
+        return { v, distanceMiles, approaching, ageSec, usedFallback };
       })
-      .filter((c) => c.ageSec === null || c.ageSec <= MAX_POSITION_AGE_SEC);
+      .filter((c) => c.ageSec === null || c.ageSec <= MAX_POSITION_AGE_SEC)
+      // A route-order guess this far from the stop isn't trustworthy —
+      // decline to classify rather than assert something specific.
+      .filter((c) => !c.usedFallback || c.distanceMiles <= MAX_FALLBACK_GUESS_DISTANCE_MILES);
 
     const inbound = candidates
       .filter((c) => c.approaching !== false)
@@ -379,19 +395,22 @@ export default function Home() {
           .map((v) => {
             const distanceMiles = kmToMiles(haversineKm(stop.lat, stop.lon, v.lat, v.lon));
             let approaching: boolean | null = null;
+            let usedFallback = false;
             if (v.bearing != null) {
               const toStop = bearingTo(v.lat, v.lon, stop.lat, stop.lon);
               approaching = angleDiff(v.bearing, toStop) <= 90;
             } else {
+              usedFallback = true;
               const vehicleOrder = estimateRouteOrder(v, currentStops);
               approaching = stop.order >= vehicleOrder;
             }
             const ageSec = v.recordedAt
               ? Math.round((Date.now() - new Date(v.recordedAt).getTime()) / 1000)
               : null;
-            return { v, distanceMiles, approaching, ageSec };
+            return { v, distanceMiles, approaching, ageSec, usedFallback };
           })
-          .filter((c) => c.ageSec === null || c.ageSec <= MAX_POSITION_AGE_SEC);
+          .filter((c) => c.ageSec === null || c.ageSec <= MAX_POSITION_AGE_SEC)
+          .filter((c) => !c.usedFallback || c.distanceMiles <= MAX_FALLBACK_GUESS_DISTANCE_MILES);
 
         const best = candidates
           .filter((c) => c.approaching !== false)
