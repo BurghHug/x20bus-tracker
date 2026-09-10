@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import dynamic from "next/dynamic";
 import { STOPS_STRATFORD, STOPS_SOLIHULL, Direction } from "@/lib/stops";
+import { FULL_SCHEDULE_TOWARDS_STRATFORD, ScheduleStop } from "@/lib/fullSchedule";
 
 const BusMap = dynamic(() => import("@/components/BusMap"), {
   ssr: false,
@@ -189,6 +190,45 @@ function formatDelay(
   return { text: "On time", tone: "onTime" };
 }
 
+// Only trust a match to the full published schedule when the vehicle is
+// genuinely close to one of its stops — calibrated against the real
+// distances between consecutive stops on this route (the longest gap is
+// ~3.5 miles, so 2 miles comfortably covers even a vehicle sitting at the
+// midpoint between two stops).
+const MAX_SCHEDULE_MATCH_DISTANCE_MILES = 2;
+
+// The core of the "real predicted arrival" fix: rather than computing a
+// fresh drive-time estimate (which has no idea the bus is about to stop
+// and wait for passengers at several more stops before reaching yours),
+// this finds where the bus currently sits in its own published schedule
+// and measures how far ahead or behind that makes it *right now*. That
+// number already reflects real-world dwell time, because it's derived
+// from the schedule Stagecoach itself set based on how the route actually
+// runs — not a theoretical straight drive.
+function estimateScheduleDelayMinutes(
+  vLat: number,
+  vLon: number,
+  schedule: ScheduleStop[],
+  now: Date
+): number | null {
+  let nearest: ScheduleStop | null = null;
+  let bestDist = Infinity;
+  for (const s of schedule) {
+    const d = kmToMiles(haversineKm(s.lat, s.lon, vLat, vLon));
+    if (d < bestDist) {
+      bestDist = d;
+      nearest = s;
+    }
+  }
+  if (!nearest || bestDist > MAX_SCHEDULE_MATCH_DISTANCE_MILES) return null;
+
+  const scheduledAtNearest = parseTimeToday(nearest.time, now);
+  if (!scheduledAtNearest) return null;
+
+  // Positive = running late at this point in its journey, negative = early.
+  return Math.round((now.getTime() - scheduledAtNearest.getTime()) / 60000);
+}
+
 // A position is only treated as "live" if it was reported reasonably
 // recently. Without this, a stale last-known GPS fix from hours earlier
 // (e.g. after service has finished for the day) gets shown as an active
@@ -208,6 +248,11 @@ const MAX_POSITION_AGE_SEC = 300;
 // passed that specific stop. Beyond this distance, the fallback simply
 // declines to guess rather than asserting something specific and wrong.
 const MAX_FALLBACK_GUESS_DISTANCE_MILES = 3.5;
+
+// A generous cap on "approaching" — long enough to allow a genuine early
+// warning (the whole route is roughly 13 miles end to end), but still
+// excludes a vehicle that's really on a different, unrelated journey.
+const MAX_APPROACHING_DISTANCE_MILES = 12;
 
 // Comparing a live position against a scheduled time that isn't even
 // close to "now" produces a technically-correct but nonsensical result
@@ -312,9 +357,21 @@ export default function Home() {
 
     const inbound = candidates
       .filter((c) => c.approaching !== false)
+      // Even with a real bearing, "approaching" only means something within
+      // a plausible range of this route — a vehicle many miles away just
+      // happening to face roughly the right direction isn't meaningfully
+      // "on its way here."
+      .filter((c) => c.distanceMiles <= MAX_APPROACHING_DISTANCE_MILES)
       .sort((a, b) => a.distanceMiles - b.distanceMiles);
     const departing = candidates
       .filter((c) => c.approaching === false)
+      // "Just passed" specifically claims recent physical proximity — that
+      // claim needs a real distance check regardless of whether we got the
+      // direction from an actual bearing or the route-order fallback.
+      // Without this, a bus many miles away on a completely unrelated
+      // journey that simply isn't facing this stop gets reported as having
+      // just left it.
+      .filter((c) => c.distanceMiles <= MAX_FALLBACK_GUESS_DISTANCE_MILES)
       .sort((a, b) => a.distanceMiles - b.distanceMiles);
 
     const best = inbound[0] || null;
@@ -349,13 +406,40 @@ export default function Home() {
 
     const straightLineMinutes = best ? estimateMinutes(best.distanceMiles) : null;
     const routed = best ? routedEtas[stop.id] : undefined;
-    const minutes = routed ? routed.minutes : straightLineMinutes;
-
-    const predictedArrival = best && minutes !== null ? new Date(now.getTime() + minutes * 60000) : null;
     const scheduledTarget = nearestScheduledTime(stop.keyTimes, now);
     const scheduleIsCurrentlyPlausible =
       scheduledTarget !== null &&
       Math.abs(scheduledTarget.getTime() - now.getTime()) <= MAX_SCHEDULE_COMPARISON_MIN * 60000;
+
+    // Primary method: work out the bus's real, currently-observed delay
+    // against its own full published schedule, then apply that same
+    // offset to this stop's scheduled time. Only available in the
+    // Stratford direction (the only one we have a full schedule for) and
+    // only when the bus is close enough to a known schedule point to
+    // trust the match.
+    const scheduleDelayMin =
+      best && direction === "stratford"
+        ? estimateScheduleDelayMinutes(best.v.lat, best.v.lon, FULL_SCHEDULE_TOWARDS_STRATFORD, now)
+        : null;
+
+    let minutes: number | null = null;
+    let predictedArrival: Date | null = null;
+    let predictionSource: "schedule" | "routed" | "straightLine" | null = null;
+
+    if (best && scheduleDelayMin !== null && scheduledTarget) {
+      predictedArrival = new Date(scheduledTarget.getTime() + scheduleDelayMin * 60000);
+      minutes = Math.round((predictedArrival.getTime() - now.getTime()) / 60000);
+      predictionSource = "schedule";
+    } else if (best && routed) {
+      minutes = routed.minutes;
+      predictedArrival = new Date(now.getTime() + minutes * 60000);
+      predictionSource = "routed";
+    } else if (best && straightLineMinutes !== null) {
+      minutes = straightLineMinutes;
+      predictedArrival = new Date(now.getTime() + minutes * 60000);
+      predictionSource = "straightLine";
+    }
+
     const delay =
       predictedArrival && scheduledTarget && scheduleIsCurrentlyPlausible
         ? formatDelay(predictedArrival, scheduledTarget)
@@ -367,7 +451,7 @@ export default function Home() {
       nearest: best?.v || null,
       distanceMiles: routed ? routed.miles : best ? best.distanceMiles : null,
       minutes,
-      isRouted: !!routed,
+      predictionSource,
       justPassedMiles: justPassed ? justPassed.distanceMiles : null,
       delay,
       age,
@@ -414,6 +498,7 @@ export default function Home() {
 
         const best = candidates
           .filter((c) => c.approaching !== false)
+          .filter((c) => c.distanceMiles <= MAX_APPROACHING_DISTANCE_MILES)
           .sort((a, b) => a.distanceMiles - b.distanceMiles)[0];
 
         if (!best) continue;
@@ -525,7 +610,7 @@ export default function Home() {
       )}
 
       <div className="space-y-3">
-        {stopCards.map(({ stop, nearest, distanceMiles, minutes, isRouted, justPassedMiles, delay, age, noMatchReason }) => {
+        {stopCards.map(({ stop, nearest, distanceMiles, minutes, predictionSource, justPassedMiles, delay, age, noMatchReason }) => {
           const isExpanded = !!expandedStops[stop.id];
           // Live cards get distance/routing/vehicle details; "No bus
           // nearby" cards get a "Why?" explanation when we have one —
@@ -602,8 +687,10 @@ export default function Home() {
                     <>
                       <p>
                         {distanceMiles!.toFixed(1)} miles away
-                        {isRouted ? (
-                          <span className="text-emerald-500/70"> · road-routed</span>
+                        {predictionSource === "schedule" ? (
+                          <span className="text-emerald-500/70"> · schedule-adjusted</span>
+                        ) : predictionSource === "routed" ? (
+                          <span className="text-sky-500/70"> · road-routed</span>
                         ) : (
                           <span> · straight-line estimate</span>
                         )}
