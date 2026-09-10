@@ -285,6 +285,17 @@ export default function Home() {
   const [now, setNow] = useState(new Date());
   const [expandedStops, setExpandedStops] = useState<Record<string, boolean>>({});
 
+  // The fix for cross-stop contradictions ("Due" at one stop, "Just
+  // passed" at a later one, for the same single bus): rather than judging
+  // each stop independently from a noisy single-moment bearing reading,
+  // track the highest point each vehicle has been confidently confirmed at
+  // in the FULL published schedule. This is monotonic — it only ever moves
+  // forward — so a wobbly bearing mid-turn (e.g. looping through a school
+  // bus park) can no longer cause a false "just passed," and two stops can
+  // never disagree about the same bus, because both are derived from this
+  // one shared number.
+  const [vehicleProgress, setVehicleProgress] = useState<Record<string, { maxOrder: number; updatedAt: number }>>({});
+
   function toggleDetails(stopId: string) {
     setExpandedStops((prev) => ({ ...prev, [stopId]: !prev[stopId] }));
   }
@@ -315,6 +326,39 @@ export default function Home() {
     return () => clearInterval(id);
   }, []);
 
+  // Update each vehicle's high-water mark whenever fresh data arrives.
+  // This only advances forward (Math.max), and old entries expire after
+  // 30 minutes of no update — long enough to survive normal gaps between
+  // polls, short enough that tomorrow's run starts with a clean slate
+  // rather than inheriting today's finished journey.
+  useEffect(() => {
+    if (!data?.vehicles?.length) return;
+    const nowMs = Date.now();
+    setVehicleProgress((prev) => {
+      const next: Record<string, { maxOrder: number; updatedAt: number }> = {};
+      for (const id of Object.keys(prev)) {
+        if (nowMs - prev[id].updatedAt <= 30 * 60000) next[id] = prev[id];
+      }
+      for (const v of data.vehicles) {
+        if (!v.towardsStratford) continue; // full schedule only covers this direction
+        let nearest: ScheduleStop | null = null;
+        let bestDist = Infinity;
+        for (const s of FULL_SCHEDULE_TOWARDS_STRATFORD) {
+          const d = kmToMiles(haversineKm(s.lat, s.lon, v.lat, v.lon));
+          if (d < bestDist) {
+            bestDist = d;
+            nearest = s;
+          }
+        }
+        if (!nearest || bestDist > MAX_SCHEDULE_MATCH_DISTANCE_MILES) continue;
+        const existing = next[v.id];
+        const newMax = existing ? Math.max(existing.maxOrder, nearest.order) : nearest.order;
+        next[v.id] = { maxOrder: newMax, updatedAt: nowMs };
+      }
+      return next;
+    });
+  }, [data]);
+
   const stops = direction === "stratford" ? STOPS_STRATFORD : STOPS_SOLIHULL;
 
   const filteredBuses =
@@ -323,11 +367,119 @@ export default function Home() {
     ) || [];
 
   const stopCards = stops.map((stop) => {
-    // For every candidate vehicle, work out its distance, whether it's
-    // heading toward the stop or away, and how old its reported position
-    // is. Stale positions (the bus hasn't reported in a while — often
-    // because service has ended, or it's gone out of signal) are dropped
-    // entirely rather than shown as a misleadingly "live" countdown.
+    if (direction === "stratford") {
+      // --- New model: one authoritative vehicle position, shared by every
+      // stop in this direction, so cards can never contradict each other
+      // the way "Due at Henley" + "Just passed Bearley" did.
+      const scheduleEntry = FULL_SCHEDULE_TOWARDS_STRATFORD.find((s) => s.id === stop.id);
+
+      const candidates = filteredBuses
+        .map((v) => {
+          const progress = vehicleProgress[v.id];
+          const ageSec = v.recordedAt
+            ? Math.round((now.getTime() - new Date(v.recordedAt).getTime()) / 1000)
+            : null;
+          return { v, progress, ageSec };
+        })
+        .filter((c) => c.progress);
+
+      // The single most-advanced matched vehicle becomes authoritative for
+      // every stop in this direction this render — not chosen per stop.
+      let authoritative: { v: Vehicle; maxOrder: number; ageSec: number | null } | null = null;
+      for (const c of candidates) {
+        if (!authoritative || c.progress!.maxOrder > authoritative.maxOrder) {
+          authoritative = { v: c.v, maxOrder: c.progress!.maxOrder, ageSec: c.ageSec };
+        }
+      }
+      const isCurrentlyFresh =
+        !!authoritative && (authoritative.ageSec === null || authoritative.ageSec <= MAX_POSITION_AGE_SEC);
+
+      let nearest: Vehicle | null = null;
+      let justPassedMiles: number | null = null;
+      let minutes: number | null = null;
+      let predictionSource: "schedule" | "routed" | "straightLine" | null = null;
+      let delay: { text: string; tone: "late" | "early" | "onTime" } | null = null;
+      let age: { text: string; stale: boolean } | null = null;
+      let noMatchReason: string | null = null;
+
+      const scheduledTarget = nearestScheduledTime(stop.keyTimes, now);
+      const scheduleIsCurrentlyPlausible =
+        scheduledTarget !== null &&
+        Math.abs(scheduledTarget.getTime() - now.getTime()) <= MAX_SCHEDULE_COMPARISON_MIN * 60000;
+
+      if (authoritative && scheduleEntry) {
+        if (scheduleEntry.order < authoritative.maxOrder) {
+          // Definitely passed — a settled historical fact from the
+          // high-water mark, shown even if the live feed has since gone
+          // quiet, rather than reverting to "no bus nearby."
+          justPassedMiles = kmToMiles(
+            haversineKm(stop.lat, stop.lon, authoritative.v.lat, authoritative.v.lon)
+          );
+        } else if (isCurrentlyFresh) {
+          nearest = authoritative.v;
+          const scheduleDelayMin = estimateScheduleDelayMinutes(
+            authoritative.v.lat,
+            authoritative.v.lon,
+            FULL_SCHEDULE_TOWARDS_STRATFORD,
+            now
+          );
+          if (scheduleDelayMin !== null && scheduledTarget) {
+            const predictedArrival = new Date(scheduledTarget.getTime() + scheduleDelayMin * 60000);
+            minutes = Math.round((predictedArrival.getTime() - now.getTime()) / 60000);
+            predictionSource = "schedule";
+            delay = scheduleIsCurrentlyPlausible ? formatDelay(predictedArrival, scheduledTarget) : null;
+          } else {
+            const distMiles = kmToMiles(
+              haversineKm(stop.lat, stop.lon, authoritative.v.lat, authoritative.v.lon)
+            );
+            minutes = estimateMinutes(distMiles);
+            predictionSource = "straightLine";
+          }
+          age = formatAge(authoritative.v.recordedAt, now);
+        }
+        // else: this stop is still ahead, but the authoritative vehicle's
+        // current position is too stale to responsibly predict from —
+        // falls through to "No bus nearby" below.
+      }
+
+      if (!nearest && justPassedMiles === null) {
+        if (authoritative && !isCurrentlyFresh) {
+          noMatchReason = `The matched bus (#${authoritative.v.id}) hasn't reported a fresh position recently — its last confirmed point was too stale to give a live reading.`;
+        } else if (filteredBuses.length > 0) {
+          const closest = filteredBuses
+            .map((v) => ({ v, d: kmToMiles(haversineKm(stop.lat, stop.lon, v.lat, v.lon)) }))
+            .sort((a, b) => a.d - b.d)[0];
+          noMatchReason = closest
+            ? `Nearest bus on this line (#${closest.v.id}, ${closest.d.toFixed(
+                1
+              )} mi away) doesn't match a known point on this route closely enough to trust — likely the regular commercial X20 rather than this school working.`
+            : null;
+        }
+      }
+
+      const distanceMiles = nearest
+        ? kmToMiles(haversineKm(stop.lat, stop.lon, nearest.lat, nearest.lon))
+        : justPassedMiles;
+
+      return {
+        stop,
+        nearest,
+        distanceMiles,
+        minutes,
+        predictionSource,
+        justPassedMiles,
+        delay,
+        age,
+        noMatchReason,
+      };
+    }
+
+    // --- Towards Solihull: no full published schedule built for this
+    // direction yet, so it still uses the earlier per-stop bearing /
+    // route-order model. Known limitation: this direction can still show
+    // the cross-stop inconsistency the Stratford fix above eliminates —
+    // worth building the same full-schedule model for this direction too
+    // if it turns out to matter as much as the afternoon run.
     const candidates = filteredBuses
       .map((v) => {
         const distKm = haversineKm(stop.lat, stop.lon, v.lat, v.lon);
@@ -338,9 +490,6 @@ export default function Home() {
           const toStop = bearingTo(v.lat, v.lon, stop.lat, stop.lon);
           approaching = angleDiff(v.bearing, toStop) <= 90;
         } else {
-          // No bearing reported — fall back to route order: only treat
-          // this stop as still-ahead if the vehicle's estimated position
-          // along the route hasn't already reached (or passed) it.
           usedFallback = true;
           const vehicleOrder = estimateRouteOrder(v, stops);
           approaching = stop.order >= vehicleOrder;
@@ -351,36 +500,20 @@ export default function Home() {
         return { v, distanceMiles, approaching, ageSec, usedFallback };
       })
       .filter((c) => c.ageSec === null || c.ageSec <= MAX_POSITION_AGE_SEC)
-      // A route-order guess this far from the stop isn't trustworthy —
-      // decline to classify rather than assert something specific.
       .filter((c) => !c.usedFallback || c.distanceMiles <= MAX_FALLBACK_GUESS_DISTANCE_MILES);
 
     const inbound = candidates
       .filter((c) => c.approaching !== false)
-      // Even with a real bearing, "approaching" only means something within
-      // a plausible range of this route — a vehicle many miles away just
-      // happening to face roughly the right direction isn't meaningfully
-      // "on its way here."
       .filter((c) => c.distanceMiles <= MAX_APPROACHING_DISTANCE_MILES)
       .sort((a, b) => a.distanceMiles - b.distanceMiles);
     const departing = candidates
       .filter((c) => c.approaching === false)
-      // "Just passed" specifically claims recent physical proximity — that
-      // claim needs a real distance check regardless of whether we got the
-      // direction from an actual bearing or the route-order fallback.
-      // Without this, a bus many miles away on a completely unrelated
-      // journey that simply isn't facing this stop gets reported as having
-      // just left it.
       .filter((c) => c.distanceMiles <= MAX_FALLBACK_GUESS_DISTANCE_MILES)
       .sort((a, b) => a.distanceMiles - b.distanceMiles);
 
     const best = inbound[0] || null;
     const justPassed = !best && departing[0] ? departing[0] : null;
 
-    // When neither of the above applies, work out *why* — so "2 buses
-    // detected but nothing shown" is diagnosable instead of a mystery.
-    // This looks at the single nearest candidate overall, even ones that
-    // got excluded, purely to explain the exclusion.
     let noMatchReason: string | null = null;
     if (!best && !justPassed) {
       const allCandidates = filteredBuses.map((v) => ({
@@ -411,26 +544,11 @@ export default function Home() {
       scheduledTarget !== null &&
       Math.abs(scheduledTarget.getTime() - now.getTime()) <= MAX_SCHEDULE_COMPARISON_MIN * 60000;
 
-    // Primary method: work out the bus's real, currently-observed delay
-    // against its own full published schedule, then apply that same
-    // offset to this stop's scheduled time. Only available in the
-    // Stratford direction (the only one we have a full schedule for) and
-    // only when the bus is close enough to a known schedule point to
-    // trust the match.
-    const scheduleDelayMin =
-      best && direction === "stratford"
-        ? estimateScheduleDelayMinutes(best.v.lat, best.v.lon, FULL_SCHEDULE_TOWARDS_STRATFORD, now)
-        : null;
-
     let minutes: number | null = null;
     let predictedArrival: Date | null = null;
     let predictionSource: "schedule" | "routed" | "straightLine" | null = null;
 
-    if (best && scheduleDelayMin !== null && scheduledTarget) {
-      predictedArrival = new Date(scheduledTarget.getTime() + scheduleDelayMin * 60000);
-      minutes = Math.round((predictedArrival.getTime() - now.getTime()) / 60000);
-      predictionSource = "schedule";
-    } else if (best && routed) {
+    if (best && routed) {
       minutes = routed.minutes;
       predictedArrival = new Date(now.getTime() + minutes * 60000);
       predictionSource = "routed";
@@ -511,7 +629,9 @@ export default function Home() {
       }
     }
 
-    if (data?.vehicles?.length) refineEtas();
+    // Only needed for Solihull now — Stratford gets its ETA from the
+    // schedule-relative method above, which doesn't need OSRM at all.
+    if (data?.vehicles?.length && direction === "solihull") refineEtas();
 
     return () => {
       cancelled = true;
