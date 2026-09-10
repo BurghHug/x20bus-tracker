@@ -367,6 +367,34 @@ export default function Home() {
     ) || [];
 
   const stopCards = stops.map((stop) => {
+    // Gate applied before anything else, in both directions: if the
+    // scheduled time for this stop isn't even roughly plausible right now
+    // (more than 90 minutes off), don't attempt to match any bus to it at
+    // all — regardless of what's detected nearby. Without this, a bus
+    // spotted at 6pm can get reported as "just passed" a 7:35am stop,
+    // which is a real gap this had from the start: the same plausibility
+    // check already existed for the delay text, but was never applied to
+    // the core live/passed decision itself.
+    const windowCheckTarget = nearestScheduledTime(stop.keyTimes, now);
+    const outsideServiceWindow =
+      windowCheckTarget === null ||
+      Math.abs(windowCheckTarget.getTime() - now.getTime()) > MAX_SCHEDULE_COMPARISON_MIN * 60000;
+
+    if (outsideServiceWindow) {
+      return {
+        stop,
+        nearest: null,
+        distanceMiles: null,
+        minutes: null,
+        predictionSource: null,
+        justPassedMiles: null,
+        delay: null,
+        age: null,
+        noMatchReason: null,
+        outsideServiceWindow: true,
+      };
+    }
+
     if (direction === "stratford") {
       // --- New model: one authoritative vehicle position, shared by every
       // stop in this direction, so cards can never contradict each other
@@ -471,6 +499,7 @@ export default function Home() {
         delay,
         age,
         noMatchReason,
+        outsideServiceWindow: false,
       };
     }
 
@@ -574,6 +603,7 @@ export default function Home() {
       delay,
       age,
       noMatchReason,
+      outsideServiceWindow: false,
     };
   });
 
@@ -730,12 +760,12 @@ export default function Home() {
       )}
 
       <div className="space-y-3">
-        {stopCards.map(({ stop, nearest, distanceMiles, minutes, predictionSource, justPassedMiles, delay, age, noMatchReason }) => {
+        {stopCards.map(({ stop, nearest, distanceMiles, minutes, predictionSource, justPassedMiles, delay, age, noMatchReason, outsideServiceWindow }) => {
           const isExpanded = !!expandedStops[stop.id];
           // Live cards get distance/routing/vehicle details; "No bus
           // nearby" cards get a "Why?" explanation when we have one —
           // either way, there's something worth being able to expand.
-          const hasDetails = !!nearest || !!noMatchReason;
+          const hasDetails = !outsideServiceWindow && (!!nearest || !!noMatchReason);
           return (
             <article
               key={stop.id}
@@ -757,7 +787,11 @@ export default function Home() {
                 )}
               </div>
 
-              {nearest && minutes !== null ? (
+              {outsideServiceWindow ? (
+                <p className="text-slate-500 text-sm mb-2">
+                  Outside today's window for this stop — not checking for a bus yet.
+                </p>
+              ) : nearest && minutes !== null ? (
                 <div className="mb-2">
                   <p className="text-3xl font-bold text-emerald-400">
                     {minutes <= 1 ? "Due" : `${minutes} min`}
