@@ -713,7 +713,13 @@ export default function Home() {
                 <div className="border-t border-slate-700 pt-2 mt-1">
                   {stop.keyTimes.map((t) => {
                     const scheduledDate = parseTimeToday(t, now);
-                    const relative = scheduledDate ? formatRelative(scheduledDate, now) : null;
+                    // Only show the "in Xm" countdown when there's no live
+                    // prediction already covering this — with one present,
+                    // a second independently-counting-down number next to
+                    // it reads as a contradiction rather than context, even
+                    // though it's really just the un-adjusted schedule.
+                    const relative =
+                      scheduledDate && !nearest ? formatRelative(scheduledDate, now) : null;
                     const imminent =
                       scheduledDate !== null &&
                       Math.abs(scheduledDate.getTime() - now.getTime()) <= MAX_SCHEDULE_COMPARISON_MIN * 60000;
